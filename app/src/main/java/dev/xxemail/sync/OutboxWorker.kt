@@ -5,13 +5,12 @@ import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import dev.xxemail.XxEmailApp
+import dev.xxemail.data.api.send
 import dev.xxemail.data.db.OutboxEntity
 import dev.xxemail.data.db.OutboxState
 import java.io.File
 import java.io.IOException
 import java.util.Base64
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * Sends queued RFC822 payloads. The undo window / schedule delay is expressed as the
@@ -42,8 +41,16 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
         val attemptsUsed = entry.attempts + 1
         return try {
             val bytes = resolvePayload(applicationContext.filesDir, dao, entry)
+            // E5 undo race: single guarded re-read immediately before the network call.
+            // If undo/cancel touched (or deleted) the row while we prepared the payload,
+            // it no longer shows our SENDING claim — abort without sending.
+            if (SendCancelPolicy.shouldAbortBeforeSend(dao.get(id)?.state)) {
+                return Result.success()
+            }
             val repo = graph.mailRepository(entry.accountEmail)
-            graph.gmailApi(entry.accountEmail).sendRaw(bytes.toRequestBody("message/rfc822".toMediaType()))
+            // Media upload cannot carry threadId; threaded sends go through the JSON
+            // multipart variant (see GmailUploads).
+            graph.gmailApi(entry.accountEmail).send(bytes, entry.threadId)
             // SENT is recorded BEFORE any post-send work (archiveAfterSend): if archiving
             // throws or the process dies here, the message must never be sent again.
             dao.setState(id, OutboxState.SENT.name)

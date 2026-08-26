@@ -17,9 +17,12 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import dev.xxemail.appGraph
 import dev.xxemail.data.api.MimeComposer
 import dev.xxemail.data.repo.ComposeRequest
+import dev.xxemail.data.repo.MailRepository
 import dev.xxemail.di.AppGraph
+import dev.xxemail.domain.Recipients
 import dev.xxemail.domain.SafePaths
 import dev.xxemail.ui.components.SendEvents
+import dev.xxemail.ui.components.fullDate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -46,9 +49,37 @@ class ComposeViewModel(
     var error by mutableStateOf<String?>(null)
         private set
 
+    /** Forward-only offer: original message attachments the user can pull in. */
+    var offeredForwardAttachments by mutableStateOf<List<MailRepository.AttachmentMeta>>(emptyList())
+        private set
+
     val attachments = mutableStateListOf<File>()
     private var threadId: String? = null
     private var inReplyToHeader: String? = null
+
+    /** Args signature of the last prefill — identical args (config change) keep user edits. */
+    private var prefillKey: String? = null
+
+    /**
+     * Resets every draft field. Called at most once per distinct argument set so a fresh
+     * compose never inherits a previous draft's body/attachments/threading state (E1).
+     */
+    private fun resetDraft() {
+        to = ""
+        cc = ""
+        bcc = ""
+        subject = ""
+        body = ""
+        error = null
+        offeredForwardAttachments = emptyList()
+        inReplyToHeader = null
+        threadId = null
+        val stale = attachments.toList()
+        attachments.clear()
+        if (stale.isNotEmpty()) {
+            viewModelScope.launch(Dispatchers.IO) { stale.forEach { it.delete() } }
+        }
+    }
 
     fun prefill(
         initialTo: String,
@@ -58,6 +89,11 @@ class ComposeViewModel(
         quoteMessageId: String,
         mode: String,
     ) {
+        val key = listOf(account, initialTo, initialCc, initialSubject, threadIdArg, quoteMessageId, mode).joinToString("|")
+        if (prefillKey == key) return // same screen recomposed — keep in-progress edits
+        prefillKey = key
+        resetDraft()
+
         to = initialTo
         cc = initialCc
         subject = initialSubject
@@ -67,20 +103,83 @@ class ComposeViewModel(
             val original = runCatching { repo.messageSnapshot(quoteMessageId) }.getOrNull() ?: return@launch
             inReplyToHeader = original.messageIdHeader
             if (threadId.isNullOrBlank()) threadId = original.threadId
+
             when (mode) {
-                "reply", "reply_all" -> {
-                    if (to.isBlank()) to = extractAddress(original.fromAddress)
-                    if (mode == "reply_all" && cc.isBlank()) cc = original.ccCsv
+                "reply" -> {
+                    to = Recipients.replyTo(original.fromAddress, original.toCsv, account).joinToString(", ")
+                    cc = ""
+                }
+                "reply_all" -> {
+                    val (toSet, ccSet) = Recipients.replyAll(original.fromAddress, original.toCsv, original.ccCsv, account)
+                    to = toSet.joinToString(", ")
+                    cc = ccSet.joinToString(", ")
                 }
                 "forward" -> {
                     to = ""
+                    cc = ""
                     subject = if (subject.startsWith("Fwd:")) subject else "Fwd: ${original.subject}"
+                    if (original.hasAttachments) {
+                        loadForwardAttachmentOffer(quoteMessageId, original.threadId)
+                    }
                 }
             }
-            if (subject.isBlank()) subject = "Re: ${original.subject}"
-            val quoted = (original.bodyPlain ?: original.snippet).lines().joinToString("\n") { "> $it" }
-            body = "\n\n$quoted\n\nOn ${original.date}, ${original.fromAddress} wrote:\n"
+            if (mode != "forward" && subject.isBlank()) subject = "Re: ${original.subject}"
+
+            // Quote from the real body; fetch it if sync only stored metadata (E2).
+            val plain = fetchQuotedBody(quoteMessageId, original)
+            val wroteLine =
+                "On ${fullDate(original.date).ifBlank { "an unknown date" }}, " +
+                    original.fromAddress.ifBlank { "an unknown sender" } + " wrote:"
+            body = if (mode == "forward") {
+                "\n\n$wroteLine\n\n$plain\n"
+            } else {
+                val quoted = plain.lines().joinToString("\n") { "> $it" }
+                "\n\n$wroteLine\n\n$quoted\n"
+            }
         }
+    }
+
+    /** Bodies may still be metadata-only right after open — go through loadFullThread. */
+    private suspend fun fetchQuotedBody(
+        quoteMessageId: String,
+        snapshot: dev.xxemail.data.db.MessageEntity,
+    ): String {
+        snapshot.bodyPlain?.let { return it }
+        val full = runCatching { repo.loadFullThread(snapshot.threadId) }.getOrDefault(emptyList())
+        return full.firstOrNull { it.entity.id == quoteMessageId }?.let { it.plain ?: it.entity.bodyPlain }
+            ?: snapshot.snippet
+    }
+
+    /** Offers the forwarded message's attachments for inclusion (downloaded on accept). */
+    private suspend fun loadForwardAttachmentOffer(quoteMessageId: String, threadId: String) {
+        val full = runCatching { repo.loadFullThread(threadId) }.getOrDefault(emptyList())
+        offeredForwardAttachments = full
+            .firstOrNull { it.entity.id == quoteMessageId }
+            ?.attachments
+            .orEmpty()
+    }
+
+    /** Downloads the offered originals into the attachment list (existing repo method). */
+    fun includeOriginalAttachments() {
+        val metas = offeredForwardAttachments
+        if (metas.isEmpty()) return
+        offeredForwardAttachments = emptyList()
+        viewModelScope.launch(Dispatchers.IO) {
+            metas.forEach { meta ->
+                runCatching { repo.downloadAttachment(meta) }
+                    .onSuccess { file -> attachments.add(file) }
+                    .onFailure { t ->
+                        Log.w(TAG, "Could not include forwarded attachment ${meta.filename}", t)
+                        withContext(Dispatchers.Main) {
+                            error = t.message ?: "Could not include attachment"
+                        }
+                    }
+            }
+        }
+    }
+
+    fun declineForwardAttachments() {
+        offeredForwardAttachments = emptyList()
     }
 
     /**
@@ -119,7 +218,7 @@ class ComposeViewModel(
                 .onFailure { t ->
                     Log.w(TAG, "Attachment failed for $displayName", t)
                     target.delete()
-                    error = t.message ?: "Could not attach file"
+                    withContext(Dispatchers.Main) { error = t.message ?: "Could not attach file" }
                 }
         }
     }
@@ -135,15 +234,18 @@ class ComposeViewModel(
         viewModelScope.launch {
             try {
                 val request = ComposeRequest(
-                    to = splitAddresses(to),
-                    cc = splitAddresses(cc),
-                    bcc = splitAddresses(bcc),
+                    to = Recipients.parseValidated(to),
+                    cc = Recipients.parseValidated(cc),
+                    bcc = Recipients.parseValidated(bcc),
                     subject = subject.ifBlank { "(no subject)" },
                     bodyText = body,
                     threadId = threadId,
                     inReplyToMessageId = inReplyToHeader,
                     attachmentFiles = attachments.toList(),
                 )
+                require(request.to.isNotEmpty() || request.cc.isNotEmpty() || request.bcc.isNotEmpty()) {
+                    "No valid recipients"
+                }
                 val outboxId = repo.enqueueSend(request, scheduledAt)
                 SendEvents.queued.emit(
                     SendEvents.QueuedSend(
@@ -161,21 +263,20 @@ class ComposeViewModel(
         }
     }
 
+    override fun onCleared() {
+        super.onCleared()
+        // Draft discarded/left: staged upload copies and downloaded originals are no
+        // longer referenced — drop them so nothing lingers past this compose session.
+        attachments.forEach { it.delete() }
+        attachments.clear()
+    }
+
     companion object {
         private const val TAG = "ComposeViewModel"
         private const val COPY_BUFFER_BYTES = 64 * 1024
 
         /** Per-file cap mirrors the compose-time total attachment budget. */
         val MAX_UPLOAD_BYTES: Long = MimeComposer.MAX_TOTAL_ATTACHMENT_BYTES
-
-        fun splitAddresses(raw: String): List<String> =
-            raw.split(',', ';').map { it.trim() }.filter { it.contains('@') }
-
-        private fun extractAddress(headerValue: String): String {
-            val lt = headerValue.lastIndexOf('<')
-            val gt = headerValue.lastIndexOf('>')
-            return if (lt in 1 until gt) headerValue.substring(lt + 1, gt).trim() else headerValue.trim()
-        }
 
         /** Schedule presets mirroring Gmail's UX constants. */
         fun schedulePresets(now: ZonedDateTime): List<Pair<String, ZonedDateTime>> {
@@ -194,10 +295,17 @@ class ComposeViewModel(
 }
 
 @Composable
-fun rememberComposeViewModel(account: String): ComposeViewModel {
+fun rememberComposeViewModel(
+    account: String,
+    threadId: String,
+    quoteMessageId: String,
+    mode: String,
+): ComposeViewModel {
     val graph = LocalContext.current.appGraph
     return viewModel(
-        key = "compose-$account",
+        // Key includes the route identity so a reply/forward/new-compose never reuses a
+        // previous compose's ViewModel (and its leftover state) — E1.
+        key = "compose-$account-$threadId-$quoteMessageId-$mode",
         factory = viewModelFactory { initializer { ComposeViewModel(graph, account) } },
     )
 }
