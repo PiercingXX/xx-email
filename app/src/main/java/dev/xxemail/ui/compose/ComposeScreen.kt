@@ -2,6 +2,7 @@ package dev.xxemail.ui.compose
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -63,8 +64,16 @@ fun ComposeScreen(
         vm.prefill(initialTo, initialCc, initialSubject, threadId, quoteMessageId, mode)
     }
 
+    // Closure 2: the resolver's MIME type rides along with each picked document.
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        uris.forEach { uri -> vm.addAttachment(context, uri, uri.lastPathSegment ?: "attachment") }
+        uris.forEach { uri ->
+            vm.addAttachment(
+                context,
+                uri,
+                uri.lastPathSegment ?: "attachment",
+                context.contentResolver.getType(uri),
+            )
+        }
     }
 
     Scaffold(
@@ -122,11 +131,14 @@ fun ComposeScreen(
                 OutlinedTextField(value = vm.cc, onValueChange = { vm.cc = it }, label = { Text("Cc") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 OutlinedTextField(value = vm.bcc, onValueChange = { vm.bcc = it }, label = { Text("Bcc") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             } else {
+                // F8: the affordance is actually clickable (it previously looked tappable but was not).
                 Text(
                     "Add Cc/Bcc",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(top = 4.dp),
+                    modifier = Modifier
+                        .padding(top = 4.dp)
+                        .clickable { showCcBcc = true },
                 )
             }
             OutlinedTextField(
@@ -138,11 +150,11 @@ fun ComposeScreen(
             )
             if (vm.attachments.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    vm.attachments.forEach { file ->
+                    vm.attachments.forEach { staged ->
                         InputChip(
                             selected = false,
-                            onClick = { vm.removeAttachment(file) },
-                            label = { Text(file.name.substringAfter('-')) },
+                            onClick = { vm.removeAttachment(staged.file) },
+                            label = { Text(staged.file.name.substringAfter('-')) },
                             trailingIcon = { Icon(Icons.Filled.Close, "Remove") },
                         )
                     }

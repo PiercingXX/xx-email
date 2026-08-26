@@ -21,6 +21,8 @@ import androidx.compose.material.icons.filled.Reply
 import androidx.compose.material.icons.filled.ReplyAll
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Forward
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -30,10 +32,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -42,6 +42,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -74,11 +76,16 @@ fun ThreadScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
 
+    // F4: only failures surface here — successful actions emit their undo to the
+    // mailbox-level bus (UndoBus) and pop back via onDone.
     LaunchedEffect(vm) {
-        vm.undoEvents.collect { u ->
-            val result = snackbarHostState.showSnackbar(u.message, actionLabel = "Undo", duration = SnackbarDuration.Short)
-            if (result == SnackbarResult.ActionPerformed) runCatching { u.revert() }
-        }
+        androidx.compose.runtime.snapshotFlow { vm.actionError }
+            .collect { message ->
+                if (message != null) {
+                    snackbarHostState.showSnackbar(message)
+                    vm.consumeActionError()
+                }
+            }
     }
 
     Scaffold(
@@ -87,6 +94,20 @@ fun ThreadScreen(
                 title = { Text(row?.subject.orEmpty(), maxLines = 1) },
                 navigationIcon = {
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+                },
+                actions = {
+                    // F8: thread-level star toggle.
+                    val starred = row?.starred
+                    IconButton(
+                        onClick = { if (starred != null) vm.toggleStar(!starred) },
+                        enabled = starred != null,
+                    ) {
+                        Icon(
+                            imageVector = if (starred == true) Icons.Filled.Star else Icons.Filled.StarBorder,
+                            contentDescription = if (starred == true) "Unstar" else "Star",
+                            tint = if (starred == true) Color(0xFFF4B400) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 },
             )
         },
@@ -108,13 +129,19 @@ fun ThreadScreen(
                     }
                 }
                 BottomAppBar {
-                    IconButton(onClick = { vm.archive(); onBack() }) { Icon(Icons.Filled.Archive, "Archive") }
-                    IconButton(onClick = { vm.trash(); onBack() }) { Icon(Icons.Filled.Delete, "Delete") }
-                    IconButton(onClick = { vm.markUnread(); onBack() }) { Icon(Icons.Filled.MarkEmailUnread, "Mark unread") }
+                    // F4: navigation happens only AFTER the action succeeds (onDone);
+                    // failures keep the user here with an error snackbar.
+                    IconButton(onClick = { vm.archive(onBack) }) { Icon(Icons.Filled.Archive, "Archive") }
+                    IconButton(onClick = { vm.trash(onBack) }) { Icon(Icons.Filled.Delete, "Delete") }
+                    IconButton(onClick = { vm.markUnread(onBack) }) { Icon(Icons.Filled.MarkEmailUnread, "Mark unread") }
                     if (row?.snoozedUntil != null) {
-                        IconButton(onClick = { vm.unsnooze(); onBack() }) { Icon(Icons.Filled.AlarmOn, "Unsnooze") }
+                        IconButton(onClick = { vm.unsnooze() }) { Icon(Icons.Filled.AlarmOn, "Unsnooze") }
                     } else {
-                        IconButton(onClick = { vm.snooze(SnoozePresets.tomorrowMorning(ZonedDateTime.now()).toInstant().toEpochMilli()); onBack() }) {
+                        IconButton(
+                            onClick = {
+                                vm.snooze(SnoozePresets.tomorrowMorning(ZonedDateTime.now()).toInstant().toEpochMilli(), onBack)
+                            },
+                        ) {
                             Icon(Icons.Filled.Schedule, "Snooze until tomorrow")
                         }
                     }
@@ -199,18 +226,92 @@ private fun MessageCard(
 @Composable
 private fun HtmlBody(html: String, allowRemoteImages: Boolean) {
     val sanitized = remember(html, allowRemoteImages) { sanitizeHtml(html, allowRemoteImages) }
+    val textColor = MaterialTheme.colorScheme.onSurface
     AndroidView(
         factory = { ctx ->
             android.widget.TextView(ctx).apply {
                 movementMethod = android.text.method.LinkMovementMethod.getInstance()
-                setTextColor(android.graphics.Color.TRANSPARENT)
                 linksClickable = true
             }
         },
         update = { tv ->
-            tv.setTextColor(0xFF202124.toInt())
-            tv.text = android.text.Html.fromHtml(sanitized, android.text.Html.FROM_HTML_MODE_LEGACY)
+            // F6: theme color instead of hardcoded light-theme gray (invisible in dark mode).
+            tv.setTextColor(textColor.toArgb())
+            tv.text = android.text.Html.fromHtml(
+                sanitized,
+                android.text.Html.FROM_HTML_MODE_LEGACY,
+                GatedImageGetter(tv, allowRemoteImages),
+                null,
+            )
         },
         modifier = Modifier.fillMaxWidth(),
     )
+}
+
+/**
+ * F6: remote-image gate for Html.fromHtml. When loading is disallowed (the default)
+ * every <img> becomes a transparent placeholder; when allowed, the bitmap is fetched
+ * off the main thread, capped to a sane width, and swapped into its span on the UI
+ * thread. sanitizeHtml already strips <img> entirely when disallowed — defense in depth.
+ */
+private class GatedImageGetter(
+    private val textView: android.widget.TextView,
+    private val allowed: Boolean,
+) : android.text.Html.ImageGetter {
+
+    override fun getDrawable(source: String): android.graphics.drawable.Drawable {
+        // 1x1 transparent stand-in keeps the span position stable either way.
+        val placeholder = android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT)
+            .apply { setBounds(0, 0, PLACEHOLDER_PX, PLACEHOLDER_PX) }
+        if (!allowed) return placeholder
+        Thread {
+            runCatching {
+                val conn = java.net.URL(source).openConnection() as java.net.HttpURLConnection
+                try {
+                    conn.connectTimeout = 10_000
+                    conn.readTimeout = 10_000
+                    conn.instanceFollowRedirects = true
+                    val bitmap = conn.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }
+                        ?: return@runCatching
+                    val scale = minOf(
+                        1f,
+                        textView.width.coerceAtLeast(1).toFloat() / bitmap.width.coerceAtLeast(1),
+                    )
+                    val drawable = android.graphics.drawable.BitmapDrawable(textView.resources, bitmap).apply {
+                        setBounds(
+                            0,
+                            0,
+                            (bitmap.width * scale).toInt().coerceAtLeast(1),
+                            (bitmap.height * scale).toInt().coerceAtLeast(1),
+                        )
+                    }
+                    textView.post {
+                        val editable = textView.text as? android.text.Editable ?: return@post
+                        editable.getSpans(0, editable.length, android.text.style.ImageSpan::class.java)
+                            .firstOrNull { it.drawable === placeholder }
+                            ?.let { old ->
+                                val start = editable.getSpanStart(old)
+                                val end = editable.getSpanEnd(old)
+                                if (start >= 0 && end >= start) {
+                                    editable.removeSpan(old)
+                                    editable.setSpan(
+                                        android.text.style.ImageSpan(drawable),
+                                        start,
+                                        end,
+                                        android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                                    )
+                                }
+                            }
+                    }
+                } finally {
+                    conn.disconnect()
+                }
+            }.onFailure { android.util.Log.w("GatedImageGetter", "Remote image failed: $source", it) }
+        }.start()
+        return placeholder
+    }
+
+    private companion object {
+        const val PLACEHOLDER_PX = 1
+    }
 }

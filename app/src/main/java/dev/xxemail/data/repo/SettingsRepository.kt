@@ -29,6 +29,7 @@ class SettingsRepository(private val context: Context) {
         val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
         val SYNC_MINUTES = intPreferencesKey("sync_interval_minutes")
         val REMOTE_IMAGES = booleanPreferencesKey("remote_images_allowed")
+        val LAST_ACCOUNT = stringPreferencesKey("last_account")
     }
 
     // Flows for UI
@@ -43,6 +44,9 @@ class SettingsRepository(private val context: Context) {
     val syncMinutesFlow: Flow<Int> = context.settingsDataStore.data.map { it[Keys.SYNC_MINUTES] ?: DEFAULT_SYNC_MINUTES }
     val remoteImagesFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[Keys.REMOTE_IMAGES] ?: false }
 
+    /** Account whose mailbox was last open — cold start returns here (F1). */
+    val lastAccountFlow: Flow<String?> = context.settingsDataStore.data.map { it[Keys.LAST_ACCOUNT]?.takeIf(String::isNotEmpty) }
+
     // Suspend getters for workers/repos
     suspend fun clientId(): String? = clientIdFlow.first()
     suspend fun undoSeconds(): Int = undoSecondsFlow.first()
@@ -52,6 +56,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun notificationsEnabled(): Boolean = notificationsEnabledFlow.first()
     suspend fun syncMinutes(): Int = syncMinutesFlow.first()
     suspend fun remoteImagesAllowed(): Boolean = remoteImagesFlow.first()
+    suspend fun lastAccount(): String? = lastAccountFlow.first()
 
     suspend fun setClientId(value: String?) = edit { it[Keys.CLIENT_ID] = value.orEmpty() }
     suspend fun setUndoSeconds(v: Int) = edit { it[Keys.UNDO_SECONDS] = v.coerceIn(5, 30) }
@@ -63,6 +68,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun setNotificationsEnabled(v: Boolean) = edit { it[Keys.NOTIFICATIONS_ENABLED] = v }
     suspend fun setSyncMinutes(v: Int) = edit { it[Keys.SYNC_MINUTES] = v.coerceAtLeast(15) }
     suspend fun setRemoteImages(v: Boolean) = edit { it[Keys.REMOTE_IMAGES] = v }
+    suspend fun setLastAccount(v: String?) = edit { it[Keys.LAST_ACCOUNT] = v.orEmpty() }
 
     private suspend inline fun edit(crossinline transform: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         context.settingsDataStore.edit { transform(it) }

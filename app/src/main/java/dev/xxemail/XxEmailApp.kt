@@ -6,6 +6,9 @@ import androidx.work.WorkManager
 import dev.xxemail.di.AppGraph
 import dev.xxemail.notify.Notifier
 import dev.xxemail.sync.SyncScheduler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class XxEmailApp : Application() {
 
@@ -16,7 +19,12 @@ class XxEmailApp : Application() {
         super.onCreate()
         graph = AppGraph(this)
         Notifier.ensureChannels(this)
-        SyncScheduler.ensurePeriodic(graph.workManager, 15)
+        // Register the periodic poll with the SAVED interval (default 15). Async so we never
+        // block startup on DataStore; WorkManager persists the request across reboots, so
+        // this also covers process starts that never reach a mailbox screen.
+        CoroutineScope(Dispatchers.Default).launch {
+            SyncScheduler.ensurePeriodic(graph.workManager, graph.settings.syncMinutes())
+        }
     }
 }
 

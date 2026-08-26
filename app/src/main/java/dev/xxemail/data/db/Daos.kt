@@ -154,6 +154,16 @@ interface OutboxDao {
     suspend fun clearLegacyPayload(id: Long)
     @Query("SELECT id FROM outbox WHERE accountEmail = :account AND state = 'QUEUED'")
     suspend fun queuedIdsForAccount(account: String): List<Long>
+    @Query("SELECT * FROM outbox WHERE accountEmail = :account AND state = 'FAILED' ORDER BY createdAt ASC")
+    suspend fun failedForAccount(account: String): List<OutboxEntity>
+
+    /**
+     * Race-safe undo (E5 closure): flips QUEUED→CANCELLED only when still queued.
+     * Returns false when the row was already claimed (SENDING) or finished — undo must
+     * never delete a live send. Mirrors [dev.xxemail.sync.SendCancelPolicy.canUndo].
+     */
+    @Query("UPDATE outbox SET state = 'CANCELLED' WHERE id = :id AND state = 'QUEUED'")
+    suspend fun cancelIfQueued(id: Long): Int
     @Query("SELECT * FROM outbox WHERE accountEmail = :account")
     suspend fun listForAccount(account: String): List<OutboxEntity>
     @Query("DELETE FROM outbox WHERE id = :id")

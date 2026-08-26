@@ -56,6 +56,10 @@ class MailboxViewModel(
     private val _undoEvents = MutableSharedFlow<Undoable>(extraBufferCapacity = 4)
     val undoEvents: SharedFlow<Undoable> = _undoEvents
 
+    /** Non-undoable notices (sync failures, retry results) shown as a plain snackbar. */
+    private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val messages: SharedFlow<String> = _messages
+
     val labels = repo.observeLabels()
 
     /** Sends that permanently failed (4xx / attempts exhausted) — shown as a banner. */
@@ -108,7 +112,7 @@ class MailboxViewModel(
     fun refresh(forceFull: Boolean = false) {
         viewModelScope.launch {
             refreshing = true
-            runCatching { repo.sync(forceFull) }
+            repo.sync(forceFull).onFailure { _messages.emit(it.message ?: "Sync failed") }
             refreshing = false
         }
     }
@@ -128,8 +132,10 @@ class MailboxViewModel(
                 SwipeAction.ARCHIVE -> repo.archive(threadIds)
                 SwipeAction.DELETE -> repo.trash(threadIds)
                 SwipeAction.MARK_READ -> repo.markRead(threadIds, read = true)
-                SwipeAction.STAR -> repo.toggleStar(threadIds.first(), starred = true)
-                SwipeAction.SNOOZE -> snoozeInternal(threadIds.first(), SnoozePresets.tomorrowMorning(ZonedDateTime.now()))
+                // Star toggles every selected row from its own current state (F5).
+                SwipeAction.STAR -> repo.toggleStars(threadIds)
+                // Direct snooze (swipe path) defaults to tomorrow 8 AM for every row.
+                SwipeAction.SNOOZE -> snoozeAll(threadIds, SnoozePresets.tomorrowMorning(ZonedDateTime.now()))
             }
             clearSelection()
             emit(undoable)
@@ -151,9 +157,15 @@ class MailboxViewModel(
     }
 
     fun snoozeUntil(threadId: String, wakeAtEpochMs: Long) {
+        snoozeUntil(listOf(threadId), wakeAtEpochMs)
+    }
+
+    /** Snoozes every target (single row or multi-selection) to one wake time (F5). */
+    fun snoozeUntil(threadIds: List<String>, wakeAtEpochMs: Long) {
+        if (threadIds.isEmpty()) return
         viewModelScope.launch {
             val wakeAt = java.time.Instant.ofEpochMilli(wakeAtEpochMs).atZone(java.time.ZoneId.systemDefault())
-            emit(snoozeInternal(threadId, wakeAt))
+            emit(snoozeAll(threadIds, wakeAt))
             clearSelection()
         }
     }
@@ -180,7 +192,25 @@ class MailboxViewModel(
     }
 
     fun cancelQueuedSend(outboxId: Long) {
-        viewModelScope.launch { runCatching { repo.cancelQueuedSend(outboxId) } }
+        viewModelScope.launch {
+            val cancelled = runCatching { repo.cancelQueuedSend(outboxId) }.getOrDefault(false)
+            if (!cancelled) _messages.emit("Too late to undo — send already in progress")
+        }
+    }
+
+    /** Failed-send banner retry: re-queues every FAILED row for its worker. */
+    fun retryFailedSends() {
+        viewModelScope.launch {
+            val retried = runCatching { repo.retryFailedSends() }.getOrDefault(0)
+            if (retried > 0) _messages.emit("Retrying $retried failed send${if (retried == 1) "" else "s"}…")
+        }
+    }
+
+    private suspend fun snoozeAll(threadIds: List<String>, wakeAt: ZonedDateTime): Undoable {
+        val undoables = threadIds.map { snoozeInternal(it, wakeAt) }
+        return Undoable(if (threadIds.size == 1) "Snoozed" else "${threadIds.size} snoozed") {
+            undoables.forEach { it.revert() }
+        }
     }
 
     private suspend fun snoozeInternal(threadId: String, wakeAt: ZonedDateTime): Undoable =

@@ -33,6 +33,7 @@ import dev.xxemail.data.db.SnoozeWakeEntity
 import dev.xxemail.data.db.ThreadDao
 import dev.xxemail.data.db.ThreadEntity
 import dev.xxemail.domain.AddressUtils
+import dev.xxemail.domain.FtsEscaper
 import dev.xxemail.domain.LabelCsv
 import dev.xxemail.domain.MailboxFolder
 import dev.xxemail.domain.SafePaths
@@ -57,6 +58,9 @@ import java.util.concurrent.TimeUnit
 /** An action the user can reverse via snackbar while the window is open. */
 class Undoable(val message: String, val revert: suspend () -> Unit)
 
+/** An outgoing attachment with its MIME type, when known from the picker/metadata (closure 2). */
+data class OutgoingAttachment(val file: File, val mimeType: String? = null)
+
 data class ComposeRequest(
     val to: List<String>,
     val cc: List<String> = emptyList(),
@@ -66,7 +70,7 @@ data class ComposeRequest(
     val threadId: String? = null,
     val inReplyToMessageId: String? = null,
     val referencesHeader: String? = null,
-    val attachmentFiles: List<File> = emptyList(),
+    val attachments: List<OutgoingAttachment> = emptyList(),
 )
 
 class MailRepository(
@@ -381,6 +385,12 @@ class MailRepository(
         val html: String?,
         val plain: String?,
         val attachments: List<AttachmentMeta>,
+        /**
+         * Raw `References` header observed on the messages.get(full) payload — closure 1:
+         * lets reply prefill seed the whole chain instead of parent-only. Null for
+         * rows served from cache (the header is not persisted; no schema column).
+         */
+        val referencesHeader: String? = null,
     )
 
     private val fullCache = LinkedHashMap<String, List<FullMessage>>()
@@ -407,7 +417,13 @@ class MailRepository(
                     }
                     val attJson = runCatching { json.encodeToString(atts) }.getOrNull()
                     messageDao.updateBodies(accountEmail, row.id, html, plain, attJson)
-                    FullMessage(row.copy(bodyHtml = html, bodyPlain = plain, bodyFetched = true, attachmentsJson = attJson), html, plain, atts)
+                    FullMessage(
+                        row.copy(bodyHtml = html, bodyPlain = plain, bodyFetched = true, attachmentsJson = attJson),
+                        html,
+                        plain,
+                        atts,
+                        referencesHeader = header(payload, "References").ifEmpty { null },
+                    )
                 }
             }
         }
@@ -525,6 +541,17 @@ class MailRepository(
         }
         api.modifyThread(threadId, req)
         return Undoable(if (starred) "Starred" else "Unstarred") { toggleStar(threadId, !starred) }
+    }
+
+    /**
+     * Selection star: TOGGLES each row from its own current state (not always-star),
+     * returning one combined undo that flips every row back.
+     */
+    suspend fun toggleStars(threadIds: List<String>): Undoable {
+        val undoables = threadIds.mapNotNull { id ->
+            threadDao.get(accountEmail, id)?.let { toggleStar(id, !it.starred) }
+        }
+        return Undoable("Star updated") { undoables.forEach { it.revert() } }
     }
 
     suspend fun markRead(threadIds: List<String>, read: Boolean): Undoable {
@@ -667,7 +694,10 @@ class MailRepository(
             bodyText = request.bodyText,
             inReplyToMessageId = request.inReplyToMessageId,
             referencesHeader = request.referencesHeader,
-            attachments = request.attachmentFiles.map { MimeComposer.Attachment(it, guessMime(it.name)) },
+            attachments = request.attachments.map {
+                // Picker/metadata-provided type wins; extension guessing is only a fallback.
+                MimeComposer.Attachment(it.file, it.mimeType ?: guessMime(it.file.name))
+            },
         )
         val bytes = Base64.getUrlDecoder().decode(raw)
         val targetAt = scheduledAt ?: (System.currentTimeMillis() + settings.undoSeconds() * 1000L)
@@ -704,18 +734,49 @@ class MailRepository(
         id
     }
 
-    /** Undo-send / cancel scheduled send: cancel the pending worker and drop the queued row. */
-    suspend fun cancelQueuedSend(outboxId: Long) {
+    /**
+     * Undo-send / cancel scheduled send: cancel the pending worker and drop the queued row.
+     * Refuses (returns false) when the row is no longer QUEUED — once a send has been
+     * claimed by [OutboxWorker] (SENDING) or finished (SENT), undo must never delete it.
+     * The refusal is enforced by a conditional UPDATE (`WHERE state='QUEUED'`), closing
+     * the claim-vs-undo race; this mirrors [SendCancelPolicy.canUndo] on the data side.
+     */
+    suspend fun cancelQueuedSend(outboxId: Long): Boolean {
         workManager.cancelUniqueWork(OutboxWorker.workName(outboxId))
-        outboxDao.setState(outboxId, OutboxState.CANCELLED.name)
+        // Conditional update wins the race: either we flip QUEUED→CANCELLED atomically, or
+        // the worker's SENDING claim (or a terminal state) means it is too late.
+        if (outboxDao.cancelIfQueued(outboxId) == 0) return false
         outboxDao.get(outboxId)?.let { entry ->
             OutboxFiles.deletePayloadFile(appContext.filesDir, entry.path, entry.id)
         }
         outboxDao.delete(outboxId)
+        return true
     }
 
     /** Count of sends stuck in FAILED state — surfaced for the mailbox failed-send banner. */
     fun observeFailedSends(): Flow<Int> = outboxDao.observeFailedCount(accountEmail)
+
+    /**
+     * Retry-all for the failed-send banner: flips every FAILED row back to QUEUED and
+     * re-registers its one-shot work. Returns how many rows were retried.
+     */
+    suspend fun retryFailedSends(): Int = withContext(Dispatchers.IO) {
+        val failed = outboxDao.failedForAccount(accountEmail)
+        failed.forEach { row ->
+            outboxDao.setState(row.id, OutboxState.QUEUED.name, error = null)
+            workManager.enqueueUniqueWork(
+                OutboxWorker.workName(row.id),
+                ExistingWorkPolicy.REPLACE,
+                OneTimeWorkRequestBuilder<OutboxWorker>()
+                    .setInputData(workDataOf(OutboxWorker.KEY_OUTBOX_ID to row.id))
+                    .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+                    .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                    .addTag("outbox")
+                    .build(),
+            )
+        }
+        failed.size
+    }
 
     suspend fun archiveAfterSend(threadId: String?) {
         threadId ?: return
@@ -737,11 +798,16 @@ class MailRepository(
     }
 
     suspend fun searchLocal(query: String): List<ThreadEntity> = withContext(Dispatchers.IO) {
-        val sanitized = query.replace("\"", "").trim()
-        if (sanitized.isEmpty()) return@withContext emptyList()
-        val hits = messageDao.searchLocal(accountEmail, "$sanitized*")
+        // FTS MATCH syntax is user-hostile: AND/OR/quotes/colons all throw. Escape first.
+        val escaped = FtsEscaper.escapePrefixQuery(query)
+        if (escaped.isBlank()) return@withContext emptyList()
+        val hits = messageDao.searchLocal(accountEmail, escaped)
         hits.groupBy { it.threadId }.map { (threadId, msgs) ->
             val latest = msgs.maxByOrNull { it.date }!!
+            // Reconstructed rows are display projections, not truth: take the real
+            // aggregate's inbox membership when the thread exists locally so search
+            // results do not pretend every hit lives outside the Inbox.
+            val aggregate = threadDao.get(accountEmail, threadId)
             ThreadEntity(
                 accountEmail = accountEmail,
                 id = threadId,
@@ -754,8 +820,8 @@ class MailRepository(
                 unreadCount = msgs.count { !it.read },
                 hasAttachments = msgs.any { it.hasAttachments },
                 starred = msgs.any { it.starred },
-                inInbox = false,
-                labelsCsv = latest.labelsCsv,
+                inInbox = aggregate?.inInbox ?: false,
+                labelsCsv = aggregate?.labelsCsv ?: latest.labelsCsv,
             )
         }.sortedByDescending { it.date }
     }
@@ -781,6 +847,9 @@ class MailRepository(
 
     private fun header(m: Message, name: String): String =
         m.payload?.headers?.firstOrNull { it.name.equals(name, ignoreCase = true) }?.value.orEmpty()
+
+    private fun header(payload: dev.xxemail.data.api.MessagePart, name: String): String =
+        payload.headers.firstOrNull { it.name.equals(name, ignoreCase = true) }?.value.orEmpty()
 
     private fun decodeBase64Url(data: String): String = try {
         String(Base64.getUrlDecoder().decode(data), Charsets.UTF_8)

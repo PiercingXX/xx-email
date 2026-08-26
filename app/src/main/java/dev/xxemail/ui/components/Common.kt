@@ -31,6 +31,7 @@ import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,6 +47,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.xxemail.data.db.ThreadEntity
 import dev.xxemail.data.repo.SwipeAction
+import dev.xxemail.data.repo.Undoable
 import dev.xxemail.domain.AddressUtils
 import kotlinx.coroutines.flow.MutableSharedFlow
 import java.text.SimpleDateFormat
@@ -57,6 +59,22 @@ object SendEvents {
     data class QueuedSend(val accountEmail: String, val outboxId: Long, val label: String)
 
     val queued = MutableSharedFlow<QueuedSend>(extraBufferCapacity = 8)
+}
+
+/**
+ * Mailbox-level undo bus (F4): thread-screen actions emit here so the undo snackbar is
+ * hosted by the mailbox and survives leaving the thread. Events carry the owning account;
+ * mailboxes ignore other accounts' events. replay=1 covers the pop-back window where the
+ * mailbox recomposes just after the emission.
+ */
+object UndoBus {
+    data class Event(val accountEmail: String, val undoable: Undoable)
+
+    val events = MutableSharedFlow<Event>(replay = 1, extraBufferCapacity = 8)
+
+    suspend fun emit(accountEmail: String, undoable: Undoable) {
+        events.emit(Event(accountEmail, undoable))
+    }
 }
 
 fun avatarColor(seed: String): Color {
@@ -85,6 +103,10 @@ fun fullDate(epochMs: Long): String =
 /**
  * Strips remote-content and script vectors from email HTML.
  * Remote images are removed unless the user globally allows them (tracking-pixel defense).
+ *
+ * TextView-only sanitizer for the Html.fromHtml render path (F6): it is a best-effort
+ * regex pass over a plain string, NOT a general HTML hardening layer — do not reuse it
+ * with a WebView, which needs a real parser/allowlist.
  */
 fun sanitizeHtml(html: String, allowRemoteImages: Boolean): String {
     var out = html
@@ -141,32 +163,40 @@ fun SwipeableRow(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
-    var lastDirection by remember { mutableStateOf(SwipeToDismissBoxValue.Settled) }
+    // F8: confirmValueChange only records the intent; the action itself fires AFTER the
+    // box settles back, via this effect. No mail actions run inside the gesture callback.
+    var pendingAction by remember { mutableStateOf<SwipeAction?>(null) }
     val state = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
-            lastDirection = value
             when (value) {
-                SwipeToDismissBoxValue.StartToEnd -> onAction(rightAction)
-                SwipeToDismissBoxValue.EndToStart -> onAction(leftAction)
+                SwipeToDismissBoxValue.StartToEnd -> pendingAction = rightAction
+                SwipeToDismissBoxValue.EndToStart -> pendingAction = leftAction
                 SwipeToDismissBoxValue.Settled -> Unit
             }
             false // always snap back; the action itself performs the removal
         },
     )
+    LaunchedEffect(pendingAction) {
+        val action = pendingAction ?: return@LaunchedEffect
+        onAction(action)
+        pendingAction = null
+    }
     SwipeToDismissBox(
         state = state,
         modifier = modifier,
         enableDismissFromStartToEnd = true,
         enableDismissFromEndToStart = true,
         backgroundContent = {
-            val action = if (lastDirection == SwipeToDismissBoxValue.EndToStart) leftAction else rightAction
+            // Live target drives the hint so it follows the finger during the drag.
+            val direction = state.targetValue
+            val action = if (direction == SwipeToDismissBoxValue.EndToStart) leftAction else rightAction
             Row(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.secondaryContainer)
                     .padding(horizontal = 24.dp),
                 horizontalArrangement =
-                    if (lastDirection == SwipeToDismissBoxValue.EndToStart) Arrangement.End else Arrangement.Start,
+                    if (direction == SwipeToDismissBoxValue.EndToStart) Arrangement.End else Arrangement.Start,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(swipeIcon(action), contentDescription = swipeLabel(action))
@@ -183,16 +213,18 @@ fun SwipeableRow(
 fun ThreadRow(
     thread: ThreadEntity,
     onClick: () -> Unit,
-    onStarToggle: () -> Unit,
     onLongClick: () -> Unit,
     selected: Boolean,
-    leftAction: SwipeAction,
-    rightAction: SwipeAction,
-    onSwipe: (SwipeAction) -> Unit,
     modifier: Modifier = Modifier,
+    /** Null disables swipe gestures entirely — no dead chrome (search results, F7). */
+    onSwipe: ((SwipeAction) -> Unit)? = {},
+    leftAction: SwipeAction = SwipeAction.ARCHIVE,
+    rightAction: SwipeAction = SwipeAction.DELETE,
+    /** Null hides the star control instead of rendering a no-op button (F7). */
+    onStarToggle: (() -> Unit)? = null,
     onUnsnooze: (() -> Unit)? = null,
 ) {
-    SwipeableRow(leftAction = leftAction, rightAction = rightAction, onAction = onSwipe, modifier = modifier) {
+    val rowContent: @Composable () -> Unit = {
         Surface(color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface) {
             Row(
                 modifier = Modifier
@@ -254,15 +286,24 @@ fun ThreadRow(
                         )
                     }
                 }
-                IconButton(onClick = onStarToggle) {
-                    Icon(
-                        imageVector = if (thread.starred) Icons.Filled.Star else Icons.Filled.StarBorder,
-                        contentDescription = if (thread.starred) "Unstar" else "Star",
-                        tint = if (thread.starred) Color(0xFFF4B400) else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                if (onStarToggle != null) {
+                    IconButton(onClick = onStarToggle) {
+                        Icon(
+                            imageVector = if (thread.starred) Icons.Filled.Star else Icons.Filled.StarBorder,
+                            contentDescription = if (thread.starred) "Unstar" else "Star",
+                            tint = if (thread.starred) Color(0xFFF4B400) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
+    }
+    if (onSwipe != null) {
+        SwipeableRow(leftAction = leftAction, rightAction = rightAction, onAction = onSwipe, modifier = modifier) {
+            rowContent()
+        }
+    } else {
+        Box(modifier) { rowContent() }
     }
 }
 

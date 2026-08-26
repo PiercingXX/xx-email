@@ -18,6 +18,7 @@ import dev.xxemail.appGraph
 import dev.xxemail.data.api.MimeComposer
 import dev.xxemail.data.repo.ComposeRequest
 import dev.xxemail.data.repo.MailRepository
+import dev.xxemail.data.repo.OutgoingAttachment
 import dev.xxemail.di.AppGraph
 import dev.xxemail.domain.Recipients
 import dev.xxemail.domain.SafePaths
@@ -53,9 +54,13 @@ class ComposeViewModel(
     var offeredForwardAttachments by mutableStateOf<List<MailRepository.AttachmentMeta>>(emptyList())
         private set
 
-    val attachments = mutableStateListOf<File>()
+    /** Staged attachments with their MIME type when known (picker/metadata) — closure 2. */
+    val attachments = mutableStateListOf<OutgoingAttachment>()
     private var threadId: String? = null
     private var inReplyToHeader: String? = null
+
+    /** Parent's prior References header, captured at prefill (closure 1). */
+    private var referencesHeader: String? = null
 
     /** Args signature of the last prefill — identical args (config change) keep user edits. */
     private var prefillKey: String? = null
@@ -77,7 +82,7 @@ class ComposeViewModel(
         val stale = attachments.toList()
         attachments.clear()
         if (stale.isNotEmpty()) {
-            viewModelScope.launch(Dispatchers.IO) { stale.forEach { it.delete() } }
+            viewModelScope.launch(Dispatchers.IO) { stale.forEach { it.file.delete() } }
         }
     }
 
@@ -125,8 +130,14 @@ class ComposeViewModel(
             }
             if (mode != "forward" && subject.isBlank()) subject = "Re: ${original.subject}"
 
-            // Quote from the real body; fetch it if sync only stored metadata (E2).
-            val plain = fetchQuotedBody(quoteMessageId, original)
+            // One fetch serves the quote AND threading headers (closure 1): when the
+            // messages.get(full) payload exposes the parent's References header, replies
+            // seed the whole chain instead of parent-only.
+            val full = runCatching { repo.loadFullThread(original.threadId) }.getOrDefault(emptyList())
+            val quotedFull = full.firstOrNull { it.entity.id == quoteMessageId }
+            referencesHeader = quotedFull?.referencesHeader
+
+            val plain = original.bodyPlain ?: quotedFull?.let { it.plain ?: it.entity.bodyPlain } ?: original.snippet
             val wroteLine =
                 "On ${fullDate(original.date).ifBlank { "an unknown date" }}, " +
                     original.fromAddress.ifBlank { "an unknown sender" } + " wrote:"
@@ -139,18 +150,7 @@ class ComposeViewModel(
         }
     }
 
-    /** Bodies may still be metadata-only right after open — go through loadFullThread. */
-    private suspend fun fetchQuotedBody(
-        quoteMessageId: String,
-        snapshot: dev.xxemail.data.db.MessageEntity,
-    ): String {
-        snapshot.bodyPlain?.let { return it }
-        val full = runCatching { repo.loadFullThread(snapshot.threadId) }.getOrDefault(emptyList())
-        return full.firstOrNull { it.entity.id == quoteMessageId }?.let { it.plain ?: it.entity.bodyPlain }
-            ?: snapshot.snippet
-    }
-
-    /** Offers the forwarded message's attachments for inclusion (downloaded on accept). */
+    /** Downloads the offered originals into the attachment list (existing repo method). */
     private suspend fun loadForwardAttachmentOffer(quoteMessageId: String, threadId: String) {
         val full = runCatching { repo.loadFullThread(threadId) }.getOrDefault(emptyList())
         offeredForwardAttachments = full
@@ -167,7 +167,10 @@ class ComposeViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             metas.forEach { meta ->
                 runCatching { repo.downloadAttachment(meta) }
-                    .onSuccess { file -> attachments.add(file) }
+                    .onSuccess { file ->
+                        // Known MIME from the original message flows through (closure 2).
+                        attachments.add(OutgoingAttachment(file, meta.mimeType.takeIf(String::isNotBlank)))
+                    }
                     .onFailure { t ->
                         Log.w(TAG, "Could not include forwarded attachment ${meta.filename}", t)
                         withContext(Dispatchers.Main) {
@@ -182,13 +185,20 @@ class ComposeViewModel(
         offeredForwardAttachments = emptyList()
     }
 
+    fun removeAttachment(file: File) {
+        attachments.removeAll { it.file == file }
+        file.delete()
+    }
+
     /**
      * Copies the selected document into `cacheDir/uploads` under a sanitized name.
      * Provider-supplied display names are reduced to a safe single path segment, the
      * target is verified inside the uploads directory, and copying is capped at
      * [MAX_UPLOAD_BYTES] so a huge file cannot exhaust memory/disk.
+     * The resolver-provided MIME type flows through to the send path (closure 2);
+     * null keeps the extension-based guess in [MailRepository.enqueueSend].
      */
-    fun addAttachment(context: Context, uri: Uri, displayName: String) {
+    fun addAttachment(context: Context, uri: Uri, displayName: String, mimeType: String? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             val dir = File(context.cacheDir, "uploads").apply { mkdirs() }
             val name = SafePaths.childNameOr(
@@ -214,18 +224,14 @@ class ComposeViewModel(
                         }
                     }
                 } ?: error("Could not open the selected file")
-            }.onSuccess { if (target.exists()) attachments.add(target) }
-                .onFailure { t ->
-                    Log.w(TAG, "Attachment failed for $displayName", t)
-                    target.delete()
-                    withContext(Dispatchers.Main) { error = t.message ?: "Could not attach file" }
-                }
+            }.onSuccess {
+                if (target.exists()) attachments.add(OutgoingAttachment(target, mimeType?.takeIf(String::isNotBlank)))
+            }.onFailure { t ->
+                Log.w(TAG, "Attachment failed for $displayName", t)
+                target.delete()
+                withContext(Dispatchers.Main) { error = t.message ?: "Could not attach file" }
+            }
         }
-    }
-
-    fun removeAttachment(file: File) {
-        attachments.remove(file)
-        file.delete()
     }
 
     fun send(scheduledAt: Long?, onQueued: () -> Unit) {
@@ -241,7 +247,8 @@ class ComposeViewModel(
                     bodyText = body,
                     threadId = threadId,
                     inReplyToMessageId = inReplyToHeader,
-                    attachmentFiles = attachments.toList(),
+                    referencesHeader = referencesHeader,
+                    attachments = attachments.toList(),
                 )
                 require(request.to.isNotEmpty() || request.cc.isNotEmpty() || request.bcc.isNotEmpty()) {
                     "No valid recipients"
@@ -267,7 +274,7 @@ class ComposeViewModel(
         super.onCleared()
         // Draft discarded/left: staged upload copies and downloaded originals are no
         // longer referenced — drop them so nothing lingers past this compose session.
-        attachments.forEach { it.delete() }
+        attachments.forEach { it.file.delete() }
         attachments.clear()
     }
 

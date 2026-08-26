@@ -19,8 +19,7 @@ import dev.xxemail.data.db.ThreadEntity
 import dev.xxemail.data.repo.MailRepository
 import dev.xxemail.data.repo.Undoable
 import dev.xxemail.di.AppGraph
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
+import dev.xxemail.ui.components.UndoBus
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -44,8 +43,14 @@ class ThreadViewModel(
     var full by mutableStateOf<List<MailRepository.FullMessage>>(emptyList())
         private set
 
-    private val _undoEvents = MutableSharedFlow<Undoable>(extraBufferCapacity = 4)
-    val undoEvents: SharedFlow<Undoable> = _undoEvents
+    /** Last failed action's message — surfaced as a snackbar; the user stays put (F4). */
+    var actionError by mutableStateOf<String?>(null)
+        private set
+
+    /** Called by the UI once an [actionError] was displayed so it can fire again. */
+    fun consumeActionError() {
+        actionError = null
+    }
 
     init {
         viewModelScope.launch {
@@ -58,24 +63,41 @@ class ThreadViewModel(
 
     suspend fun downloadAttachment(meta: MailRepository.AttachmentMeta): java.io.File = repo.downloadAttachment(meta)
 
-    fun archive() = launchUndo { repo.archive(listOf(threadId)) }
-    fun trash() = launchUndo { repo.trash(listOf(threadId)) }
-    fun markUnread() = launchUndo { repo.markRead(listOf(threadId), read = false) }
-    fun reportSpam() = launchUndo { repo.reportSpam(listOf(threadId)) }
-    fun toggleStar(starred: Boolean) = launchUndo { repo.toggleStar(threadId, starred) }
-    fun snooze(wakeAtMs: Long) = launchUndo { repo.snooze(threadId, wakeAtMs) }
-    fun applyLabel(labelId: String, add: Boolean) = launchUndo { repo.applyLabel(labelId, add, listOf(threadId)) }
+    fun archive(onDone: () -> Unit = {}) = launchUndo(onDone) { repo.archive(listOf(threadId)) }
+    fun trash(onDone: () -> Unit = {}) = launchUndo(onDone) { repo.trash(listOf(threadId)) }
+    fun markUnread(onDone: () -> Unit = {}) = launchUndo(onDone) { repo.markRead(listOf(threadId), read = false) }
+    fun reportSpam(onDone: () -> Unit = {}) = launchUndo(onDone) { repo.reportSpam(listOf(threadId)) }
+    fun toggleStar(starred: Boolean, onDone: () -> Unit = {}) = launchUndo(onDone) { repo.toggleStar(threadId, starred) }
+    fun snooze(wakeAtMs: Long, onDone: () -> Unit = {}) = launchUndo(onDone) { repo.snooze(threadId, wakeAtMs) }
+    fun applyLabel(labelId: String, add: Boolean, onDone: () -> Unit = {}) =
+        launchUndo(onDone) { repo.applyLabel(labelId, add, listOf(threadId)) }
 
     /** Real unsnooze (cancels wake work + row, restores INBOX). No undo — snoozing again is one tap. */
     fun unsnooze() {
         viewModelScope.launch {
             runCatching { repo.unsnooze(threadId) }
-                .onFailure { Log.w(TAG, "Unsnooze failed for $threadId", it) }
+                .onFailure {
+                    Log.w(TAG, "Unsnooze failed for $threadId", it)
+                    actionError = it.message ?: "Unsnooze failed"
+                }
         }
     }
 
-    private fun launchUndo(block: suspend () -> Undoable) {
-        viewModelScope.launch { _undoEvents.emit(block()) }
+    /**
+     * F4: actions run to completion BEFORE the caller navigates back; undo events go to
+     * the mailbox-level bus so the snackbar survives leaving this screen; failures set
+     * [actionError] instead of being swallowed.
+     */
+    private fun launchUndo(onSuccess: () -> Unit = {}, block: suspend () -> Undoable) {
+        viewModelScope.launch {
+            runCatching { block() }
+                .onSuccess { undoable ->
+                    actionError = null
+                    UndoBus.emit(account, undoable)
+                    onSuccess()
+                }
+                .onFailure { actionError = it.message ?: "Action failed" }
+        }
     }
 }
 

@@ -35,6 +35,7 @@ import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -70,6 +71,7 @@ import dev.xxemail.ui.components.Avatar
 import dev.xxemail.ui.components.EmptyState
 import dev.xxemail.ui.components.SendEvents
 import dev.xxemail.ui.components.ThreadRow
+import dev.xxemail.ui.components.UndoBus
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.launch
@@ -95,7 +97,7 @@ fun MailboxScreen(
     val scope = rememberCoroutineScope()
     val pagerState = rememberPagerState(pageCount = { INBOX_TABS.size })
     var sheetOpen by remember { mutableStateOf(false) }
-    var snoozeTarget by remember { mutableStateOf<String?>(null) }
+    var snoozeTargets by remember { mutableStateOf<List<String>>(emptyList()) }
     var labelSheetOpen by remember { mutableStateOf(false) }
     val needsReauth by vm.needsReauth.collectAsStateWithLifecycle(false)
     val storeUnreadable by vm.storeUnreadable.collectAsStateWithLifecycle(false)
@@ -103,10 +105,27 @@ fun MailboxScreen(
     val accounts by graph.accounts.observeAccounts().collectAsStateWithLifecycle(initialValue = emptyList())
     val swipeLeft by graph.settings.swipeLeftFlow.collectAsStateWithLifecycle(SwipeAction.ARCHIVE)
     val swipeRight by graph.settings.swipeRightFlow.collectAsStateWithLifecycle(SwipeAction.DELETE)
+    val failedSends by vm.failedSends.collectAsStateWithLifecycle(0)
+
+    // F1: this mailbox is now the last-used account — cold start returns here.
+    LaunchedEffect(account) { graph.settings.setLastAccount(account) }
 
     LaunchedEffect(vm, account) {
         launch {
             vm.undoEvents.collect { u ->
+                val result = snackbarHostState.showSnackbar(u.message, actionLabel = "Undo", duration = SnackbarDuration.Short)
+                if (result == SnackbarResult.ActionPerformed) runCatching { u.revert() }
+            }
+        }
+        launch {
+            vm.messages.collect { message -> snackbarHostState.showSnackbar(message) }
+        }
+        launch {
+            // F4: undo events from the thread screen surface here, so leaving the thread
+            // does not kill the snackbar. Other accounts' events are ignored.
+            UndoBus.events.collect { event ->
+                if (event.accountEmail != account) return@collect
+                val u = event.undoable
                 val result = snackbarHostState.showSnackbar(u.message, actionLabel = "Undo", duration = SnackbarDuration.Short)
                 if (result == SnackbarResult.ActionPerformed) runCatching { u.revert() }
             }
@@ -148,7 +167,7 @@ fun MailboxScreen(
                     onDelete = { vm.perform(SwipeAction.DELETE, vm.selection.toList()) },
                     onMarkUnread = { vm.markUnread(vm.selection.toList()) },
                     onStar = { vm.perform(SwipeAction.STAR, vm.selection.toList()) },
-                    onSnooze = { snoozeTarget = vm.selection.first() },
+                    onSnooze = { snoozeTargets = vm.selection.toList() },
                     onLabels = { labelSheetOpen = true },
                 )
             }
@@ -158,6 +177,8 @@ fun MailboxScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+            // F3: real refresh indicator driven by the sync state.
+            if (vm.refreshing) LinearProgressIndicator(Modifier.fillMaxWidth())
             if (needsReauth || storeUnreadable) {
                 ReauthBanner(
                     message = if (storeUnreadable) {
@@ -167,6 +188,9 @@ fun MailboxScreen(
                     },
                     onSignInAgain = onSignInAgain,
                 )
+            }
+            if (failedSends > 0) {
+                FailedSendsBanner(count = failedSends, onRetry = { vm.retryFailedSends() })
             }
             val currentFolder = vm.folder
             if (currentFolder == null) {
@@ -180,10 +204,10 @@ fun MailboxScreen(
                     }
                 }
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
-                    ThreadListPage(vm, INBOX_TABS[page], onOpenThread, swipeLeft, swipeRight, onSnooze = { snoozeTarget = it })
+                    ThreadListPage(vm, INBOX_TABS[page], onOpenThread, swipeLeft, swipeRight, onSnooze = { snoozeTargets = listOf(it) })
                 }
             } else {
-                ThreadListPage(vm, currentFolder, onOpenThread, swipeLeft, swipeRight, onSnooze = { snoozeTarget = it })
+                ThreadListPage(vm, currentFolder, onOpenThread, swipeLeft, swipeRight, onSnooze = { snoozeTargets = listOf(it) })
             }
         }
     }
@@ -200,10 +224,13 @@ fun MailboxScreen(
             onDismiss = { sheetOpen = false },
         )
     }
-    snoozeTarget?.let { threadId ->
+    snoozeTargets.takeIf { it.isNotEmpty() }?.let { targets ->
         SnoozeSheet(
-            onPick = { wakeAt -> vm.snoozeUntil(threadId, wakeAt); snoozeTarget = null },
-            onDismiss = { snoozeTarget = null },
+            onPick = { wakeAt ->
+                vm.snoozeUntil(targets, wakeAt)
+                snoozeTargets = emptyList()
+            },
+            onDismiss = { snoozeTargets = emptyList() },
         )
     }
     if (labelSheetOpen) {
@@ -226,6 +253,22 @@ private fun ReauthBanner(message: String, onSignInAgain: () -> Unit) {
                 modifier = Modifier.weight(1f),
             )
             TextButton(onClick = onSignInAgain) { Text("Sign in again") }
+        }
+    }
+}
+
+/** F3: N queued sends permanently failed — offer a retry-all. */
+@Composable
+private fun FailedSendsBanner(count: Int, onRetry: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.errorContainer, tonalElevation = 2.dp) {
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Text(
+                "$count send${if (count == 1) "" else "s"} failed",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onRetry) { Text("Retry") }
         }
     }
 }
@@ -363,6 +406,7 @@ private fun SnoozeSheet(onPick: (Long) -> Unit, onDismiss: () -> Unit) {
     val presets = buildList {
         add(Preset("Later today (${SnoozePresets.laterToday(now).format(TIME_FMT)})", SnoozePresets.laterToday(now)))
         add(Preset("Tomorrow 8:00 AM", SnoozePresets.tomorrowMorning(now)))
+        add(Preset("Weekend (Saturday 8:00 AM)", SnoozePresets.weekend(now)))
         add(Preset("Next week Monday 8:00 AM", SnoozePresets.nextWeek(now)))
     }
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -396,8 +440,15 @@ private fun LabelSheet(
             )
         }
         userLabels.forEach { label ->
+            // F5: labels can be added AND removed from the selection.
             ListItem(
                 headlineContent = { Text(label.name) },
+                trailingContent = {
+                    Row {
+                        TextButton(onClick = { onApply(label.id, true) }) { Text("Add") }
+                        TextButton(onClick = { onApply(label.id, false) }) { Text("Remove") }
+                    }
+                },
                 modifier = Modifier.clickable { onApply(label.id, true) },
             )
         }

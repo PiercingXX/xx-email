@@ -34,8 +34,9 @@ Nothing else. No contacts, location, storage, phone, camera.
 
 ## Anti-tracking behaviors
 
-- Remote images in emails are blocked by default (kills most tracking pixels).
-  Change globally in Settings → Appearance if you accept the trade-off.
+- Remote images in emails are NOT loaded unless you turn on "Load remote images" in
+  Settings → Appearance. The default is OFF, so tracking pixels stay dead until you
+  explicitly accept them.
 - `<script>`, inline event handlers, and `javascript:` URLs are stripped before rendering.
 - Links open via the system resolver; we add no redirectors or referrers.
 

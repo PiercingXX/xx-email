@@ -1,7 +1,10 @@
 package dev.xxemail.ui.settings
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -38,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.xxemail.appGraph
 import dev.xxemail.data.repo.SettingsRepository
@@ -50,7 +54,7 @@ private const val REVOKE_URL = "https://myaccount.google.com/permissions"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onAccountRemoved: (String) -> Unit = {}) {
     val graph = LocalContext.current.appGraph
     val settings = graph.settings
     val scope = rememberCoroutineScope()
@@ -65,8 +69,19 @@ fun SettingsScreen(onBack: () -> Unit) {
     val dynamic by settings.dynamicColorsFlow.collectAsStateWithLifecycle(true)
     val notifications by settings.notificationsEnabledFlow.collectAsStateWithLifecycle(true)
     val syncMinutes by settings.syncMinutesFlow.collectAsStateWithLifecycle(SettingsRepository.DEFAULT_SYNC_MINUTES)
+    val remoteImages by settings.remoteImagesFlow.collectAsStateWithLifecycle(false)
+
+    // F8: explain the toggle when the OS-level permission is missing.
+    val notificationsAllowed = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.POST_NOTIFICATIONS,
+    ) == PackageManager.PERMISSION_GRANTED
 
     var removeTarget by remember { mutableStateOf<String?>(null) }
+    var removing by remember { mutableStateOf(false) }
+
+    /** F2: post-removal outcome — warnings from AccountRepository are surfaced, not logged. */
+    var removalResult by remember { mutableStateOf<Pair<String, List<String>>?>(null) }
 
     Scaffold(
         topBar = {
@@ -119,6 +134,14 @@ fun SettingsScreen(onBack: () -> Unit) {
                     }
                 }
                 ToggleRow("New-mail notifications", notifications) { scope.launch { settings.setNotificationsEnabled(it) } }
+                if (notifications && !notificationsAllowed) {
+                    Text(
+                        "Notifications are blocked — allow them for XX Email in system settings to see new-mail alerts.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+                }
                 HorizontalDivider()
             }
             item {
@@ -134,6 +157,8 @@ fun SettingsScreen(onBack: () -> Unit) {
                     }
                 }
                 ToggleRow("Dynamic colors (Material You)", dynamic) { scope.launch { settings.setDynamicColors(it) } }
+                // F6: remote images load ONLY while this is on (default off — tracking pixels).
+                ToggleRow("Load remote images", remoteImages) { scope.launch { settings.setRemoteImages(it) } }
                 HorizontalDivider()
             }
             item {
@@ -144,7 +169,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         appendLine("• Network access goes only to Google's OAuth and Gmail API endpoints.")
                         appendLine("• Tokens are stored encrypted in the Android Keystore; never exported.")
                         appendLine("• Cloud backup of mail cache and credentials is disabled at the OS level.")
-                        appendLine("• Remote images in emails are blocked by default (tracking pixels).")
+                        appendLine("• Remote images in emails are not loaded unless you enable Load remote images (tracking pixels).")
                         appendLine("• Requested scope: gmail.modify — this app cannot permanently delete your mail.")
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -170,16 +195,63 @@ fun SettingsScreen(onBack: () -> Unit) {
 
     removeTarget?.let { email ->
         AlertDialog(
-            onDismissRequest = { removeTarget = null },
+            onDismissRequest = { if (!removing) removeTarget = null },
             title = { Text("Remove $email?") },
-            text = { Text("Removes the account, its cached mail and queued sends from this device. Your Gmail data is untouched.") },
+            text = {
+                Text(
+                    "Removes the account, its cached mail and queued sends from this device. " +
+                        "Your Gmail data is untouched.\n\n" +
+                        // F2: surface what removal does to server-side state.
+                        "Snoozed mail is moved back to the inbox on the server first; queued " +
+                        "sends and scheduled snoozes for this account are cancelled.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !removing,
+                    onClick = {
+                        removing = true
+                        scope.launch {
+                            val result = runCatching { graph.accounts.remove(email) }
+                            removing = false
+                            removeTarget = null
+                            result.onSuccess { removalResult = email to it.warnings }
+                            result.onFailure { removalResult = email to listOf("Removal failed: ${it.message}") }
+                        }
+                    },
+                ) { Text(if (removing) "Removing…" else "Remove") }
+            },
+            dismissButton = {
+                TextButton(onClick = { removeTarget = null }, enabled = !removing) { Text("Cancel") }
+            },
+        )
+    }
+
+    removalResult?.let { (email, warnings) ->
+        AlertDialog(
+            onDismissRequest = { removalResult = null },
+            title = { Text("Removed $email") },
+            text = {
+                Column {
+                    Text("The account and its local data were removed from this device.")
+                    if (warnings.isNotEmpty()) {
+                        Spacer(Modifier.padding(top = 8.dp))
+                        warnings.forEach { warning ->
+                            Text(
+                                "• $warning",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
-                    scope.launch { graph.accounts.remove(email) }
-                    removeTarget = null
-                }) { Text("Remove") }
+                    onAccountRemoved(email)
+                    removalResult = null
+                }) { Text("Done") }
             },
-            dismissButton = { TextButton(onClick = { removeTarget = null }) { Text("Cancel") } },
         )
     }
 }

@@ -60,7 +60,7 @@ object Notifier {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
             val notification = NotificationCompat.Builder(context, CHANNEL_MAIL)
-                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setSmallIcon(R.drawable.ic_notification_mail)
                 .setContentTitle(thread.fromName.ifBlank { thread.fromAddress })
                 .setContentText(thread.subject)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(thread.subject + "\n" + thread.snippet))
@@ -79,7 +79,7 @@ object Notifier {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
             val summary = NotificationCompat.Builder(context, CHANNEL_MAIL)
-                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setSmallIcon(R.drawable.ic_notification_mail)
                 .setContentTitle(accountEmail)
                 .setContentText(newThreads.size.toString() + " new messages")
                 .setGroup(groupKey)
