@@ -4,7 +4,7 @@ An **original, open-source, telemetry-free** Android email client for Gmail.
 Gmail's power features — none of the surveillance-flavored extras.
 
 ```
-Status: v0.1.0 · Kotlin 2.0 · Jetpack Compose · GPL-3.0-or-later
+Status: v0.1.1 · Kotlin 2.0 · Jetpack Compose · GPL-3.0-or-later
 Build:  ./gradlew assembleDebug   → app/build/outputs/apk/debug/app-debug.apk
 Tests:  ./gradlew testDebugUnitTest
 ```

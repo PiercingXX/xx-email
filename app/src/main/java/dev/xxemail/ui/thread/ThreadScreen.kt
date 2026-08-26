@@ -52,6 +52,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.xxemail.appGraph
 import dev.xxemail.domain.AddressUtils
+import dev.xxemail.domain.RemoteImagePolicy
 import dev.xxemail.domain.SnoozePresets
 import dev.xxemail.ui.components.Avatar
 import dev.xxemail.ui.components.sanitizeHtml
@@ -124,7 +125,9 @@ fun ThreadScreen(
                     FilledTonalButton(onClick = { onReply("reply_all", row?.subject.orEmpty(), vm.full.lastOrNull()?.entity?.id.orEmpty()) }) {
                         Icon(Icons.Filled.ReplyAll, null); Text("All")
                     }
-                    FilledTonalButton(onClick = { onReply("forward", row?.subject.orEmpty(), "") }) {
+                    FilledTonalButton(onClick = {
+                        onReply("forward", row?.subject.orEmpty(), messages.lastOrNull()?.id.orEmpty())
+                    }) {
                         Icon(Icons.Filled.Forward, null); Text("Fwd")
                     }
                 }
@@ -264,15 +267,17 @@ private class GatedImageGetter(
         val placeholder = android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT)
             .apply { setBounds(0, 0, PLACEHOLDER_PX, PLACEHOLDER_PX) }
         if (!allowed) return placeholder
+        if (!RemoteImagePolicy.isHttpsUrl(source)) return placeholder
         Thread {
             runCatching {
                 val conn = java.net.URL(source).openConnection() as java.net.HttpURLConnection
                 try {
                     conn.connectTimeout = 10_000
                     conn.readTimeout = 10_000
-                    conn.instanceFollowRedirects = true
-                    val bitmap = conn.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }
-                        ?: return@runCatching
+                    conn.instanceFollowRedirects = false
+                    val bitmap = conn.inputStream.use { stream ->
+                        android.graphics.BitmapFactory.decodeStream(CappedInputStream(stream, RemoteImagePolicy.MAX_BYTES))
+                    } ?: return@runCatching
                     val scale = minOf(
                         1f,
                         textView.width.coerceAtLeast(1).toFloat() / bitmap.width.coerceAtLeast(1),
@@ -314,4 +319,29 @@ private class GatedImageGetter(
     private companion object {
         const val PLACEHOLDER_PX = 1
     }
+}
+
+/** Stops a remote-image download once it exceeds [maxBytes] so a huge part cannot OOM. */
+private class CappedInputStream(
+    private val inner: java.io.InputStream,
+    private val maxBytes: Long,
+) : java.io.InputStream() {
+    private var seen = 0L
+
+    override fun read(): Int {
+        if (seen >= maxBytes) return -1
+        val b = inner.read()
+        if (b >= 0) seen++
+        return b
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (seen >= maxBytes) return -1
+        val allowed = minOf(len.toLong(), maxBytes - seen).toInt()
+        val n = inner.read(b, off, allowed)
+        if (n > 0) seen += n
+        return n
+    }
+
+    override fun close() = inner.close()
 }

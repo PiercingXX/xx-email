@@ -631,8 +631,12 @@ class MailRepository(
     suspend fun applyLabel(labelId: String, add: Boolean, threadIds: List<String>): Undoable {
         val req = if (add) ModifyLabelsRequest(addLabelIds = listOf(labelId))
         else ModifyLabelsRequest(removeLabelIds = listOf(labelId))
+        mutateLocal(threadIds) {
+            it.copy(
+                labelsCsv = if (add) LabelCsv.add(it.labelsCsv, labelId) else LabelCsv.remove(it.labelsCsv, labelId),
+            )
+        }
         threadIds.forEach { api.modifyThread(it, req) }
-        // Refresh aggregates so list filters stay truthful.
         hydrateThreads(threadIds)
         return Undoable(if (add) "Label applied" else "Label removed") { applyLabel(labelId, !add, threadIds) }
     }

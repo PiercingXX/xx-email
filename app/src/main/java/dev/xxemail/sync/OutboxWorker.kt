@@ -62,9 +62,7 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
             graph.gmailApi(entry.accountEmail).send(bytes, entry.threadId)
             // SENT is recorded BEFORE any post-send work (archiveAfterSend): if archiving
             // throws or the process dies here, the message must never be sent again.
-            dao.setState(id, OutboxState.SENT.name)
-            // Payload no longer needed once SENT — keep only on FAILED so users can retry.
-            OutboxFiles.deletePayloadFile(applicationContext.filesDir, entry.path, entry.id)
+            markSent(dao, id, entry.path)
             if (graph.settings.sendAndArchive()) {
                 runCatching { repo.archiveAfterSend(entry.threadId) }
                     .onFailure { Log.w(TAG, "Post-send archive failed for outbox #$id", it) }
@@ -72,26 +70,28 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
             Log.i(TAG, "Sent outbox #$id (${entry.subject})")
             Result.success()
         } catch (e: retrofit2.HttpException) {
-            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = e.code(), transportError = false), e.message)
+            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = e.code(), transportError = false), e.message, entry.path)
         } catch (e: kotlinx.serialization.SerializationException) {
             // A non-2xx response would have surfaced as HttpException, so reaching body
             // decoding means the server answered 2xx: the send succeeded even though the
             // response could not be decoded. Never retry a message that left the device.
-            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = 200, transportError = false), null)
+            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = 200, transportError = false), null, entry.path)
         } catch (e: kotlinx.coroutines.CancellationException) {
-            // The worker was stopped (constraint lost / system cancel), not a send result.
-            // Put the row back to QUEUED so WorkManager's automatic retry of this same work
-            // finds it sendable — swallowing the cancellation here would strand a QUEUED
-            // row with no scheduled work. Never mark FAILED: delivery status is unknown,
-            // and the user decides via retry if it never lands.
-            runCatching { dao.setState(id, OutboxState.QUEUED.name) }
+            // Delivery is unknown. Do NOT flip back to QUEUED — WorkManager will rerun
+            // this work when constraints return, and a second sendRaw would duplicate
+            // mail if the first request already left the device. FAILED + banner retry
+            // matches the SENDING-after-process-death recovery path.
+            val current = dao.get(id)
+            if (current?.state == OutboxState.SENDING.name) {
+                dao.setState(id, OutboxState.FAILED.name, "send interrupted")
+            }
             throw e
         } catch (e: IOException) {
             Log.w(TAG, "Send transport error for outbox #$id (attempt $attemptsUsed)", e)
-            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = null, transportError = true), e.message)
+            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = null, transportError = true), e.message, entry.path)
         } catch (e: Throwable) {
             Log.w(TAG, "Send failed for outbox #$id (attempt $attemptsUsed)", e)
-            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = null, transportError = true), e.message)
+            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = null, transportError = true), e.message, entry.path)
         }
     }
 
@@ -117,6 +117,11 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
             else -> throw IOException("Outbox #${entry.id} has neither payload file nor legacy base64")
         }
 
+    private suspend fun markSent(dao: dev.xxemail.data.db.OutboxDao, id: Long, path: String?) {
+        dao.setState(id, OutboxState.SENT.name)
+        OutboxFiles.deletePayloadFile(applicationContext.filesDir, path, id)
+    }
+
     /** Applies a [SendRetryPolicy.Outcome] to the outbox row and the WorkManager result. */
     private suspend fun applyOutcome(
         dao: dev.xxemail.data.db.OutboxDao,
@@ -124,8 +129,14 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
         attemptsUsed: Int,
         outcome: SendRetryPolicy.Outcome,
         error: String?,
+        path: String?,
     ): Result = when (outcome) {
-        SendRetryPolicy.Outcome.MARK_SENT -> Result.success()
+        // Decode-failure-after-2xx used to return success without flipping the row,
+        // so the next run treated it as interrupted and the user could resend.
+        SendRetryPolicy.Outcome.MARK_SENT -> {
+            markSent(dao, id, path)
+            Result.success()
+        }
         SendRetryPolicy.Outcome.MARK_FAILED -> {
             dao.setState(id, OutboxState.FAILED.name, error)
             Result.failure()

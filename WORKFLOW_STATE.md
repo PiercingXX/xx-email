@@ -53,6 +53,11 @@ Package: `dev.xxemail`. License target: GPL-3.0-or-later. minSdk 26 / target 35.
       remove isolation, failed-persist durability with read-only dir). Schemas wired
       into androidTest assets; runner + room-testing/test deps in catalog.
       `compileDebugAndroidTestKotlin` + `testDebugUnitTest` PASS. Device run pending.
+- [x] Post-TODO re-review (v0.1.1): 200+undecodable send now marks SENT (no duplicate
+      retry); cancellation mid-send marks FAILED not QUEUED; multipart send uses raw
+      RFC822 octets not base64; Forward passes the quoted message id; applyLabel is
+      local-first; token persist clears the unreadable flag; remote images HTTPS-only
+      + size cap; historyId accepts numeric JSON.
 
 ## Known gaps / next work
 

@@ -9,7 +9,9 @@ Only what is strictly required to read and send your own email:
 1. OAuth tokens exchanged directly with `accounts.google.com` / `oauth2.googleapis.com`.
 2. Gmail API calls to `gmail.googleapis.com` for the mail you view or send.
 
-There is no other network destination in the codebase. No analytics, no crash reporting,
+With remote images off (the default), the app itself only talks to those three Google
+hosts. Turning on “Load remote images” fetches HTTPS image URLs from message HTML —
+that is the only optional extra destination. No analytics, no crash reporting,
 no advertising identifiers, no Firebase, no Google Play Services requirement.
 
 ## What stays on your device

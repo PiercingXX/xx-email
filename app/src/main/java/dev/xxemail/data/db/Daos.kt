@@ -191,7 +191,8 @@ interface FolderPageDao {
 }
 
 @Dao
-interface SnoozeWakeDao {    @Upsert suspend fun upsert(wake: SnoozeWakeEntity)
+interface SnoozeWakeDao {
+    @Upsert suspend fun upsert(wake: SnoozeWakeEntity)
     @Query("SELECT * FROM snooze_wakes WHERE accountEmail = :account AND threadId = :threadId")
     suspend fun get(account: String, threadId: String): SnoozeWakeEntity?
     @Query("SELECT * FROM snooze_wakes WHERE targetAt <= :now ORDER BY targetAt ASC")

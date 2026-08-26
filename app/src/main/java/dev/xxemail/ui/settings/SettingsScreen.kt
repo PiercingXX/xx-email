@@ -184,7 +184,7 @@ fun SettingsScreen(onBack: () -> Unit, onAccountRemoved: (String) -> Unit = {}) 
             item {
                 SectionHeader("About")
                 Text(
-                    "XX Email 0.1.0 · GPL-3.0-or-later\nAn original, telemetry-free Gmail client.",
+                    "XX Email 0.1.1 · GPL-3.0-or-later\nAn original, telemetry-free Gmail client.",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )

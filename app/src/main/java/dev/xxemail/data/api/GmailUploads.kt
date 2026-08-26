@@ -1,6 +1,5 @@
 package dev.xxemail.data.api
 
-import java.util.Base64
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -11,7 +10,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * The plain media upload (`uploadType=media`) carries only RFC822 bytes and CANNOT set
  * `threadId`, so replies would start a new Gmail thread. For threaded sends we use the
  * JSON multipart upload (`uploadType=multipart`): a multipart/related body whose metadata
- * part is `{raw, threadId}` JSON and whose media part is the base64url message.
+ * part is `{threadId}` JSON and whose media part is the raw RFC822 octets.
  */
 object GmailUploads {
 
@@ -24,23 +23,32 @@ object GmailUploads {
     /** Plain media upload body (fresh sends). */
     fun mediaBody(rfc822: ByteArray): RequestBody = rfc822.toRequestBody(RFC822)
 
-    /** Metadata JSON part. threadId is a Gmail opaque id ([A-Za-z0-9_-]) — safe to inline. */
-    fun threadMetadataJson(threadId: String): String = "{\"threadId\":\"$threadId\"}"
+    /** Metadata JSON part. threadId is escaped so a quote cannot break the object. */
+    fun threadMetadataJson(threadId: String): String {
+        val escaped = threadId.replace("\\", "\\\\").replace("\"", "\\\"")
+        return "{\"threadId\":\"$escaped\"}"
+    }
 
-    /** Multipart/related upload body (threaded sends): metadata part + RFC822 part. */
-    fun multipartBody(rfc822Base64Url: String, threadId: String): RequestBody {
-        val body = buildString {
+    /**
+     * Multipart/related upload body (threaded sends): JSON metadata + raw RFC822 octets.
+     * The media part is the same bytes [mediaBody] would send — Gmail parses it as
+     * message/rfc822, not as base64. Encoding here produced unreadable mail.
+     */
+    fun multipartBody(rfc822: ByteArray, threadId: String): RequestBody {
+        val header = buildString {
             append("--").append(BOUNDARY).append(CRLF)
             append("Content-Type: application/json; charset=UTF-8").append(CRLF)
             append(CRLF)
             append(threadMetadataJson(threadId)).append(CRLF)
             append("--").append(BOUNDARY).append(CRLF)
             append("Content-Type: message/rfc822").append(CRLF)
-            append("Content-Transfer-Encoding: base64").append(CRLF)
             append(CRLF)
-            append(rfc822Base64Url).append(CRLF)
-            append("--").append(BOUNDARY).append("--")
-        }
+        }.toByteArray(Charsets.US_ASCII)
+        val footer = "\r\n--$BOUNDARY--".toByteArray(Charsets.US_ASCII)
+        val body = ByteArray(header.size + rfc822.size + footer.size)
+        header.copyInto(body, 0)
+        rfc822.copyInto(body, header.size)
+        footer.copyInto(body, header.size + rfc822.size)
         return body.toRequestBody("multipart/related; boundary=\"$BOUNDARY\"".toMediaType())
     }
 }
@@ -54,6 +62,5 @@ suspend fun GmailApi.send(rfc822: ByteArray, threadId: String?): dev.xxemail.dat
     if (threadId.isNullOrBlank()) {
         sendRaw(GmailUploads.mediaBody(rfc822))
     } else {
-        val b64 = Base64.getUrlEncoder().withoutPadding().encodeToString(rfc822)
-        sendMultipart(GmailUploads.multipartBody(b64, threadId))
+        sendMultipart(GmailUploads.multipartBody(rfc822, threadId))
     }

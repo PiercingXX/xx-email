@@ -146,4 +146,10 @@ class GmailJsonTest {
             assertEquals(raw, json.decodeFromString<ThreadRef>(body).historyId)
         }
     }
+
+    @Test
+    fun `numeric historyId is coerced to string`() {
+        val body = """{"id":"t","historyId":123456}"""
+        assertEquals("123456", json.decodeFromString<ThreadRef>(body).historyId)
+    }
 }

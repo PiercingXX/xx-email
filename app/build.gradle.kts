@@ -14,8 +14,8 @@ android {
         applicationId = "dev.xxemail"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
         // AppAuth's library manifest injects ${appAuthRedirectScheme} into
         // RedirectUriReceiverActivity's VIEW filter; must match the scheme in
         // OAuthConfig.REDIRECT_URI / docs/oauth-setup.md ("dev.xxemail:/oauth2redirect").

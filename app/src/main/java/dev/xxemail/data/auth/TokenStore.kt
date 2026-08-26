@@ -112,6 +112,7 @@ class TokenStore(private val filesDir: File) {
             throw IllegalStateException("Could not persist token store atomically; previous file left untouched")
         }
         cache = map.toMutableMap()
+        _unreadable.value = false
     }
 
     private fun keystoreKey(): SecretKey {

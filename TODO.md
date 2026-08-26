@@ -268,7 +268,7 @@ Unit tests that must exist before claiming the bugs are gone:
 - [x] `toThreadEntity` inInbox union (D1) — latest message SENT-only, older message still INBOX.
 - [x] New-mail detector (D3) — old unread vs first sync vs newly arrived.
 - [x] `sanitizeHtml` + filename sanitizer.
-- [ ] Address split / reply-all set logic (E2/E4).
+- [x] Address split / reply-all set logic (E2/E4).
 - [x] TokenStore persist rename-failure — not JVM-testable (AndroidKeyStore-bound); covered by instrumented `TokenStoreTest` (androidTest, runs during device pass).
 - [x] FTS query escaping (F7).
 
