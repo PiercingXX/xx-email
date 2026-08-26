@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.time.ZonedDateTime
@@ -40,6 +41,15 @@ class MailboxViewModel(
     var refreshing by mutableStateOf(false)
         private set
     val selection = mutableStateListOf<String>()
+
+    /** True when token refresh failed permanently for this account (re-auth required). */
+    val needsReauth: StateFlow<Boolean> = graph.auth.reauthNeeded
+        .map { it.contains(account) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** True when the encrypted token file exists but could not be decrypted/read. */
+    val storeUnreadable: StateFlow<Boolean> = graph.tokens.unreadable
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val _undoEvents = MutableSharedFlow<Undoable>(extraBufferCapacity = 4)
     val undoEvents: SharedFlow<Undoable> = _undoEvents

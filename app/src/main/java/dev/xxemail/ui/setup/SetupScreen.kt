@@ -60,8 +60,9 @@ fun SetupScreen(onAccountReady: (String) -> Unit) {
                 "One-time setup:\n" +
                 "1. Create a Google Cloud project at console.cloud.google.com\n" +
                 "2. Enable the Gmail API\n" +
-                "3. Create an OAuth client ID of type \"Android\" (package dev.xxemail)\n" +
-                "   — or type \"Desktop\" if you prefer the loopback-free flow\n" +
+                "3. Create an OAuth client ID of type \"Android\":\n" +
+                "   package dev.xxemail · debug + release SHA-1 (./gradlew signingReport)\n" +
+                "   · allow the custom scheme dev.xxemail (redirect dev.xxemail:/oauth2redirect)\n" +
                 "4. Paste the client ID below (full instructions: docs/oauth-setup.md)",
             style = MaterialTheme.typography.bodyMedium,
         )

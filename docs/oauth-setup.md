@@ -22,18 +22,27 @@ client ID once (~5 minutes); your quota, your project, your control.
      ("In production") without verification to avoid 7-day token expiry (you'll see a
      one-time "unverified app" warning — expected for self-signed FOSS apps).
 4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
-   - Application type: **Android**
-   - Package name: `dev.xxemail`
-   - SHA-1: run `./gradlew signingReport` and copy the `debug` variant's SHA-1
-     (or your release key's SHA-1 if you build release).
-5. Copy the **Client ID** (looks like `1234567890-abc123.apps.googleusercontent.com`)
+   - Application type: **Android** (this is the only type that works with the app's
+     native AppAuth flow — do NOT use Desktop or Web)
+   - Package name: `dev.xxemail` (exactly, case-sensitive)
+   - SHA-1 fingerprints: run `./gradlew signingReport` and add **both** the `debug`
+     variant's SHA-1 and your release key's SHA-1 if you build release builds.
+5. On the same Android client, **enable/allow the custom URI scheme** `dev.xxemail`
+   so Google accepts the app's redirect URI `dev.xxemail:/oauth2redirect`.
+   XX Email always redirects to that scheme — no loopback or https redirect is used.
+6. Copy the **Client ID** (looks like `1234567890-abc123.apps.googleusercontent.com`)
    and paste it into XX Email's setup screen.
 
 ## Notes & gotchas
 
+- The redirect URI is fixed to `dev.xxemail:/oauth2redirect`. The browser hands the
+  response to AppAuth's `RedirectUriReceiverActivity`; the client ID is *not* used to
+  derive the scheme, so one static scheme serves every user's client ID.
 - While your consent screen is in **Testing** status, refresh tokens expire after **7 days**
   (Google policy for restricted scopes). You'll be asked to sign in weekly — flip the consent
   screen to production to stop this.
+- If refresh tokens expire or get revoked, the mailbox shows a "Sign in again" banner;
+  signing in again replaces the tokens for that account without losing any local mail.
 - The app requests ONLY: `openid email profile` + `gmail.modify`.
   It cannot permanently delete mail (Google enforces this server-side for that scope).
 - To revoke access at any time: <https://myaccount.google.com/permissions>
