@@ -25,8 +25,33 @@ Package: `dev.xxemail`. License target: GPL-3.0-or-later. minSdk 26 / target 35.
 - [x] Phases A–F implemented (historyId strings + delta checkpoints, send-retry policy,
       AppAuth redirect rework, token cache/durability, safe paths, durable snooze,
       file-backed outbox, Room v3 explicit migrations, label-union threads, compose/send
-      fixes, shell/error UX, remote-image gate); 90+ JVM unit tests green.
+      fixes, shell/error UX, remote-image gate); JVM unit tests green.
       Phase G device checks remain pending.
+- [x] Phase G unit tests consolidated: 103 tests / 0 failures; `assembleDebug` +
+      R8 `assembleRelease` green. TokenStore rename-failure path not JVM-testable
+      (AndroidKeyStore-bound) — needs instrumentation.
+- [x] Phase H docs honesty pass: README matrix matches code (drafts folder-only,
+      notifications device-pending, FTS = subject/snippet/from/to only), PRIVACY
+      TokenStore path fixed, oauth-setup verified against B2 implementation.
+- [x] Post-implementation review (cumulative diff) — fixed: atomic outbox claim
+      (`claimIfQueued`) closing the undo-vs-send race; SENDING rows stranded by process
+      death now recover to FAILED("send interrupted") + banner retry;
+      `CancellationException` no longer strands QUEUED rows; delta checkpoint never
+      advances past unprocessed items or failed `threads.get`/`messages.get` lookups
+      (rewind + follow-up sync).
+
+## Known open findings (non-blocking, from review)
+
+1. Folder label filters use SQLite `LIKE` (ASCII case-fold + `%`/`_` wildcards);
+   switch to `instr(',' || labelsCsv || ',', ',' || :label || ',') > 0` if user labels
+   with `_` or case-colliding ids matter.
+2. `MailRepository.fullCache` (LinkedHashMap) is mutated from IO dispatchers without
+   synchronization — wrap in a mutex or use LruCache.
+3. `TokenCache.clear()` does not take the per-account mutex: a stale in-flight refresh
+   could persist over fresher tokens — add a generation check before persisting.
+4. Exported MainActivity queues AppAuth-shaped intents without validating `state`
+   against the outstanding request — forged redirect intents fail the next sign-in
+   rather than leaking tokens (PKCE), but state validation should be added.
 
 ## Known gaps / next work
 
