@@ -85,9 +85,8 @@ abstract class XxEmailDb : RoomDatabase() {
         }
 
         /**
-         * v0.1 ships plaintext storage, relying on Android file-based encryption + app sandbox.
-         * Injection point kept here so SQLCipher (`sqlcipher-android`) can be added as an
-         * opt-in hardening layer without touching call sites.
+         * Plaintext Room relies on Android file-based encryption + the app sandbox;
+         * swap in SQLCipher here as opt-in hardening without touching call sites.
          */
         fun build(context: Context): XxEmailDb =
             Room.databaseBuilder(context, XxEmailDb::class.java, "xxemail.db")

@@ -24,9 +24,6 @@ import javax.crypto.spec.GCMParameterSpec
 /**
  * Stores one serialized [AuthState] per account, encrypted at rest with an
  * AndroidKeyStore AES-GCM key (hardware-backed where available).
- *
- * NOTE: androidx.security-crypto (EncryptedSharedPreferences) is deprecated upstream;
- * this is the small, auditable replacement (~100 lines) with zero extra dependencies.
  */
 class TokenStore(private val filesDir: File) {
 

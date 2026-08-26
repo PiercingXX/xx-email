@@ -32,16 +32,16 @@ Cleanroom discipline: features were specified from public documentation only
 | Multi-select bulk actions | ✅ | long-press selection bar |
 | Undo send (5–30 s) | ✅ | local outbox hold + cancellable worker |
 | Schedule send (presets) | ✅ | client-side scheduler (no REST support upstream) |
-| Snooze (later today/tomorrow/next week) | ✅ | local scheduler; INBOX removed meanwhile |
+| Snooze (later today/tomorrow/next week) | ✅ | durable DB-backed wake + unsnooze; INBOX removed meanwhile |
 | Swipe actions (configurable L/R) | ✅ | archive/delete/read/star/snooze |
-| Search with operators (`from:`, `has:attachment`…) | ✅ | server `q` passthrough + offline FTS index |
+| Search with operators (`from:`, `has:attachment`…) | ✅ | server `q` passthrough + offline FTS over subject/snippet/from/to only (not bodies) |
 | Multiple accounts + unified switcher | ✅ | independent OAuth grants |
-| New-mail notifications (grouped) | ✅ | WorkManager poll (15-min floor) |
+| New-mail notifications (device verification pending) | 🚧 | WorkManager poll (15-min floor); grouped per account in code, not yet verified on hardware |
 | Attachments (view/download/send) | ✅ | base64url media upload/download |
-| Remote-image blocking (tracking pixels) | ✅ default-on | HTML sanitizer |
+| Remote-image blocking (tracking pixels) | ✅ blocking default-on | Settings toggle + gated ImageGetter; scripts stripped |
 | Encrypted token storage | ✅ | AndroidKeyStore AES-GCM |
 | No telemetry / ads / crash-reporting | ✅ | none in codebase; auditable |
-| Drafts sync | 🚧 roadmap | drafts API mapped, UI pending |
+| Drafts | 🚧 folder-only | Drafts folder browsable; no draft compose/save yet |
 | Vacation responder editor | 🚧 roadmap | settings endpoint mapped, UI pending |
 | Push notifications | ❌ by design | needs Pub/Sub relay server; see docs/architecture.md |
 | Smart Reply/Compose/nudges/Gemini | ❌ by design | Google-server ML; excluded intentionally |
