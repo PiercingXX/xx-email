@@ -29,24 +29,33 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
         val dao = graph.db.outboxDao()
         val entry = dao.get(id) ?: return Result.success() // cancelled/undone before we ran
 
-        if (entry.state != OutboxState.QUEUED.name) return Result.success()
+        when (entry.state) {
+            OutboxState.QUEUED.name -> Unit // proceed below
+            // Process death mid-send leaves the row SENDING with no live worker. WorkManager
+            // re-runs persisted work, so this branch is the recovery path: surface it as
+            // FAILED (payload file kept) so the failed-send banner and manual retry can
+            // redeliver it, instead of stranding the row in SENDING forever.
+            OutboxState.SENDING.name -> {
+                Log.w(TAG, "Outbox #$id found SENDING with no live send — marking interrupted")
+                dao.setState(id, OutboxState.FAILED.name, "send interrupted")
+                return Result.success()
+            }
+            else -> return Result.success() // SENT / FAILED / CANCELLED — nothing to do
+        }
 
         // Scheduled send fired early (OS quirks): put it back.
         if (entry.kind == dev.xxemail.data.db.OutboxKind.SCHEDULED_SEND.name && System.currentTimeMillis() < entry.targetAt) {
             return Result.retry()
         }
 
-        dao.setState(id, OutboxState.SENDING.name)
+        // Atomic claim (two-sided CAS with cancelIfQueued): if undo flipped the row to
+        // CANCELLED between the read above and here, the claim returns 0 and we must not
+        // send. No unconditional write can clobber a cancel anymore.
+        if (dao.claimIfQueued(id) == 0) return Result.success()
         dao.incrementAttempts(id)
         val attemptsUsed = entry.attempts + 1
         return try {
             val bytes = resolvePayload(applicationContext.filesDir, dao, entry)
-            // E5 undo race: single guarded re-read immediately before the network call.
-            // If undo/cancel touched (or deleted) the row while we prepared the payload,
-            // it no longer shows our SENDING claim — abort without sending.
-            if (SendCancelPolicy.shouldAbortBeforeSend(dao.get(id)?.state)) {
-                return Result.success()
-            }
             val repo = graph.mailRepository(entry.accountEmail)
             // Media upload cannot carry threadId; threaded sends go through the JSON
             // multipart variant (see GmailUploads).
@@ -69,6 +78,14 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
             // decoding means the server answered 2xx: the send succeeded even though the
             // response could not be decoded. Never retry a message that left the device.
             applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = 200, transportError = false), null)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // The worker was stopped (constraint lost / system cancel), not a send result.
+            // Put the row back to QUEUED so WorkManager's automatic retry of this same work
+            // finds it sendable — swallowing the cancellation here would strand a QUEUED
+            // row with no scheduled work. Never mark FAILED: delivery status is unknown,
+            // and the user decides via retry if it never lands.
+            runCatching { dao.setState(id, OutboxState.QUEUED.name) }
+            throw e
         } catch (e: IOException) {
             Log.w(TAG, "Send transport error for outbox #$id (attempt $attemptsUsed)", e)
             applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = null, transportError = true), e.message)

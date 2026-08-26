@@ -117,10 +117,17 @@ class MailRepository(
         runCatching {
             val existing = accountDao.get(accountEmail)
             val profile = api.getProfile()
-            accountDao.upsert(
-                existing?.copy(historyId = profile.historyId ?: existing.historyId)
-                    ?: AccountEntity(email = accountEmail, displayName = profile.emailAddress, historyId = profile.historyId),
-            )
+            if (existing == null) {
+                accountDao.upsert(
+                    AccountEntity(email = accountEmail, displayName = profile.emailAddress, historyId = profile.historyId),
+                )
+            } else {
+                // Refresh display data only. The sync checkpoint may NEVER jump ahead of
+                // processed work: it advances exclusively via updateSyncPoint after a pass
+                // completes (or in the 404 full-resync branch). Writing profile.historyId
+                // here would silently skip the whole window on a crash before processing.
+                accountDao.upsert(existing.copy(displayName = profile.emailAddress))
+            }
             syncLabels()
 
             val storedHistoryId = existing?.historyId
@@ -217,14 +224,24 @@ class MailRepository(
             if (e.code() == 404) {
                 Log.i(TAG, "history expired for $accountEmail — full resync")
                 initialSync()
+                // Advance the checkpoint explicitly: sync() no longer writes
+                // profile.historyId for existing accounts, so without this the next delta
+                // would replay from the expired id and 404-loop forever.
+                accountDao.updateSyncPoint(accountEmail, fallbackEnd ?: startHistoryId, System.currentTimeMillis())
                 return
             }
             throw e
         }
 
         // Resolve message-only refs to their thread ids.
+        var lookupFailed = false
         messageIdsNeedingLookup.forEach { mid ->
-            runCatching { api.getMessage(mid, format = "metadata") }.getOrNull()?.threadId?.let(touchedThreadIds::add)
+            val ref = runCatching { api.getMessage(mid, format = "metadata") }.getOrNull()
+            if (ref == null) {
+                lookupFailed = true
+            } else {
+                ref.threadId?.let(touchedThreadIds::add)
+            }
         }
 
         deletedMessageIds.forEach { mid ->
@@ -237,11 +254,17 @@ class MailRepository(
         }
 
         val capped = touchedThreadIds.take(MAX_THREADS_PER_DELTA)
-        hydrateThreads(capped)
+        val hydrationFailures = hydrateThreads(capped)
 
-        // Persist the last fully processed history id string as-is. With an empty window,
-        // fall back to the profile's current id so the checkpoint still advances.
-        val checkpoint = if (sawAnyItem) lastFullyProcessedId else fallbackEnd ?: startHistoryId
+        // Checkpoint invariant: never advance past work that did not fully land. A failed
+        // threads.get / messages.get rewinds to the window start and forces the immediate
+        // follow-up sync to re-walk everything — a transient failure costs one replayed
+        // window instead of silently dropped changes.
+        var checkpoint = if (sawAnyItem) lastFullyProcessedId else fallbackEnd ?: startHistoryId
+        if (lookupFailed || hydrationFailures.isNotEmpty()) {
+            sawOverflow = true
+            checkpoint = startHistoryId
+        }
         accountDao.updateSyncPoint(accountEmail, checkpoint, System.currentTimeMillis())
         if (sawOverflow) scheduleFollowUpDelta()
     }
@@ -279,14 +302,22 @@ class MailRepository(
         item.messagesDeleted.forEach { removed -> removed.message?.id?.let(deletedMessageIds::add) }
     }
 
-    /** One threads.get per id → aggregate row + per-message rows. */
-    private suspend fun hydrateThreads(threadIds: Collection<String>) {
-        if (threadIds.isEmpty()) return
+    /**
+     * One threads.get per id → aggregate row + per-message rows.
+     * Returns the ids that failed so callers can hold the delta checkpoint back —
+     * a thread whose fetch failed must be retried, not skipped until its next change.
+     */
+    private suspend fun hydrateThreads(threadIds: Collection<String>): Set<String> {
+        if (threadIds.isEmpty()) return emptySet()
         val threadRows = mutableListOf<ThreadEntity>()
         val messageRows = mutableListOf<MessageEntity>()
+        val failed = LinkedHashSet<String>()
         threadIds.forEach { id ->
             runCatching { api.getThread(id, format = "metadata") }
-                .onFailure { Log.w(TAG, "threads.get($id) failed", it) }
+                .onFailure {
+                    failed += id
+                    Log.w(TAG, "threads.get($id) failed", it)
+                }
                 .getOrNull()
                 ?.let { full ->
                     threadRows += ThreadAggregation.build(accountEmail, full, threadDao.get(accountEmail, full.id)?.snoozedUntil)
@@ -295,6 +326,7 @@ class MailRepository(
         }
         if (threadRows.isNotEmpty()) threadDao.upsertAll(threadRows)
         if (messageRows.isNotEmpty()) messageDao.upsertAll(messageRows)
+        return failed
     }
 
     /** Ensure a rarely-used folder has content; hydrates once from the server. */

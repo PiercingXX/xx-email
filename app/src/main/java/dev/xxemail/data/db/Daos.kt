@@ -164,6 +164,15 @@ interface OutboxDao {
      */
     @Query("UPDATE outbox SET state = 'CANCELLED' WHERE id = :id AND state = 'QUEUED'")
     suspend fun cancelIfQueued(id: Long): Int
+
+    /**
+     * Race-safe claim: flips QUEUED→SENDING only when still queued. Returns 0 when undo
+     * won the race (row already CANCELLED/deleted) and the worker must abort. Together
+     * with [cancelIfQueued] this makes the QUEUED→SENDING flip a two-sided CAS —
+     * whichever side wins, the other deterministically loses.
+     */
+    @Query("UPDATE outbox SET state = 'SENDING' WHERE id = :id AND state = 'QUEUED'")
+    suspend fun claimIfQueued(id: Long): Int
     @Query("SELECT * FROM outbox WHERE accountEmail = :account")
     suspend fun listForAccount(account: String): List<OutboxEntity>
     @Query("DELETE FROM outbox WHERE id = :id")
