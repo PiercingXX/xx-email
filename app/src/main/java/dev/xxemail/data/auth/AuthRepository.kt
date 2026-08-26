@@ -42,6 +42,22 @@ class AuthRepository(
         persist = { email, snapshot -> tokens.saveSerialized(email, snapshot) },
     )
 
+    /**
+     * The authorization request this app itself created for the flow in progress.
+     * Redirect `state` values are validated against it before delivery, so a forged
+     * AppAuth-shaped intent from another app can never pose as the auth result.
+     */
+    @Volatile
+    private var pendingAuthRequest: AuthorizationRequest? = null
+
+    /** State of the outstanding [buildAuthIntent] request, or null when no flow is in flight. */
+    fun outstandingAuthState(): String? = pendingAuthRequest?.state
+
+    /** Called once the redirect for the outstanding request has been accepted. */
+    fun consumeOutstandingAuthRequest() {
+        pendingAuthRequest = null
+    }
+
     /** Accounts whose refresh failed permanently and need an interactive sign-in. */
     val reauthNeeded: StateFlow<Set<String>> get() = tokenCache.reauthNeeded
 
@@ -58,6 +74,8 @@ class AuthRepository(
             .setScope(OAuthConfig.SCOPES)
             .setCodeVerifier(CodeVerifierUtil.generateRandomCodeVerifier())
             .build()
+        // Remember this request so MainActivity can validate redirect state at delivery.
+        pendingAuthRequest = request
         // getAuthorizationRequestIntent needs no binding; dispose immediately (no leak).
         val service = AuthorizationService(context)
         val intent = service.getAuthorizationRequestIntent(request)

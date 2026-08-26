@@ -9,7 +9,8 @@ package dev.xxemail.domain
  * label whose id merely contains "TRASH" as a substring.
  *
  * The Room queries mirror this exactly via
- * `(',' || labelsCsv || ',') LIKE '%,' || :label || ',%'`.
+ * `instr(',' || labelsCsv || ',', ',' || :label || ',') > 0` (byte-exact token
+ * match — SQLite LIKE would case-fold ASCII and treat %/_ as wildcards).
  */
 object LabelCsv {
 

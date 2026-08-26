@@ -40,6 +40,9 @@ interface TokenSession {
  * - Acquisitions are serialized per account (no duplicate refresh bursts); the caller's
  *   network callback runs outside the lock.
  * - If the session snapshot changed after a refresh, it is persisted via [persist].
+ * - Every [clear] bumps a per-account generation: an in-flight refresh from a
+ *   superseded session (e.g. completing just after re-auth saved fresh tokens)
+ *   is never persisted nor left cached.
  * - Permanent refresh failures surface in [reauthNeeded] for "sign in again" UX.
  */
 class TokenCache(
@@ -54,6 +57,7 @@ class TokenCache(
     private val guard = Any()
     private val sessions = HashMap<String, TokenSession>()
     private val locks = HashMap<String, Mutex>()
+    private val generations = HashMap<String, Int>()
 
     suspend fun <T> withAccessToken(email: String, block: (String) -> T): T {
         val (acquisition, changedSnapshot) = acquireFresh(email)
@@ -72,12 +76,18 @@ class TokenCache(
 
     /** Drop the cached session (after sign-out or a fresh authorization result). */
     fun clear(email: String) {
-        synchronized(guard) { sessions.remove(email) }
+        synchronized(guard) {
+            sessions.remove(email)
+            // Invalidate any refresh in flight against the old session: when it
+            // completes it must neither persist nor recache its stale snapshot.
+            generations[email] = generations.getOrDefault(email, 0) + 1
+        }
         _reauthNeeded.update { it - email }
     }
 
     private suspend fun acquireFresh(email: String): Pair<TokenAcquisition, String?> =
         lockFor(email).withLock {
+            val generation = generationOf(email)
             val session = cachedSession(email)
                 ?: loadSession(email)?.also { cacheSession(email, it) }
                 ?: error("Account not authorized: $email")
@@ -87,6 +97,12 @@ class TokenCache(
                 session.acquire(onDone = { cont.resume(it) })
             }
             val after = session.serializedSnapshot()
+            if (generationOf(email) != generation) {
+                // Superseded mid-refresh by clear(): drop everything derived from
+                // this stale session so the next use reloads fresh tokens.
+                synchronized(guard) { sessions.remove(email) }
+                return@withLock acquisition to null
+            }
             if (acquisition is TokenAcquisition.ReauthNeeded) {
                 synchronized(guard) { sessions.remove(email) }
                 _reauthNeeded.update { it + email }
@@ -99,6 +115,8 @@ class TokenCache(
     private fun cacheSession(email: String, session: TokenSession) {
         synchronized(guard) { sessions[email] = session }
     }
+
+    private fun generationOf(email: String): Int = synchronized(guard) { generations.getOrDefault(email, 0) }
 
     private fun lockFor(email: String): Mutex = synchronized(guard) { locks.getOrPut(email) { Mutex() } }
 }

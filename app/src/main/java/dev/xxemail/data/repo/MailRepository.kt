@@ -45,6 +45,8 @@ import dev.xxemail.sync.SyncScheduler
 import dev.xxemail.sync.SyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -425,12 +427,14 @@ class MailRepository(
         val referencesHeader: String? = null,
     )
 
+    /** FIFO cache of fully-fetched threads; mutex-guarded — mutated from Dispatchers.IO. */
     private val fullCache = LinkedHashMap<String, List<FullMessage>>()
+    private val fullCacheMutex = Mutex()
     private val json = Json { ignoreUnknownKeys = true }
 
     /** Fetches full bodies for a thread (lazy — sync stores metadata only). */
     suspend fun loadFullThread(threadId: String): List<FullMessage> = withContext(Dispatchers.IO) {
-        fullCache[threadId]?.let { return@withContext it }
+        fullCacheMutex.withLock { fullCache[threadId] }?.let { return@withContext it }
         val result = messageDao.listForThread(accountEmail, threadId).map { row ->
             if (row.bodyFetched) {
                 FullMessage(row, row.bodyHtml, row.bodyPlain, decodeAttachments(row))
@@ -461,8 +465,10 @@ class MailRepository(
         }
         // Only cache fully-fetched threads; failed fetches must stay retryable.
         if (result.all { it.entity.bodyFetched }) {
-            fullCache[threadId] = result
-            while (fullCache.size > 12) fullCache.remove(fullCache.keys.first())
+            fullCacheMutex.withLock {
+                fullCache[threadId] = result
+                while (fullCache.size > 12) fullCache.remove(fullCache.keys.first())
+            }
         }
         result
     }

@@ -38,14 +38,14 @@ interface ThreadDao {
     @Query(
         """SELECT * FROM threads
            WHERE accountEmail = :account AND inInbox = 1 AND snoozedUntil IS NULL
-             AND ((:includeEmpty = 1 AND categories = '') OR (:category <> '' AND (',' || categories || ',') LIKE '%,' || :category || ',%'))
+             AND ((:includeEmpty = 1 AND categories = '') OR (:category <> '' AND instr(',' || categories || ',', ',' || :category || ',') > 0))
            ORDER BY date DESC LIMIT 200""",
     )
     fun observeInboxCategory(account: String, category: String, includeEmpty: Boolean): Flow<List<ThreadEntity>>
 
     @Query(
         """SELECT * FROM threads
-           WHERE accountEmail = :account AND starred = 1 AND (',' || labelsCsv || ',') NOT LIKE '%,TRASH,%'
+           WHERE accountEmail = :account AND starred = 1 AND instr(',' || labelsCsv || ',', ',TRASH,') = 0
            ORDER BY date DESC""",
     )
     fun observeStarred(account: String): Flow<List<ThreadEntity>>
@@ -58,7 +58,7 @@ interface ThreadDao {
 
     @Query(
         """SELECT * FROM threads
-           WHERE accountEmail = :account AND (',' || labelsCsv || ',') LIKE '%,' || :labelId || ',%'
+           WHERE accountEmail = :account AND instr(',' || labelsCsv || ',', ',' || :labelId || ',') > 0
            ORDER BY date DESC LIMIT 500""",
     )
     fun observeWithLabel(account: String, labelId: String): Flow<List<ThreadEntity>>
@@ -72,7 +72,7 @@ interface ThreadDao {
     @Query(
         """SELECT COUNT(*) FROM threads
            WHERE accountEmail = :account AND inInbox = 1 AND snoozedUntil IS NULL
-             AND ((:includeEmpty = 1 AND categories = '') OR (:category <> '' AND (',' || categories || ',') LIKE '%,' || :category || ',%'))""",
+             AND ((:includeEmpty = 1 AND categories = '') OR (:category <> '' AND instr(',' || categories || ',', ',' || :category || ',') > 0))""",
     )
     suspend fun countInboxCategory(account: String, category: String, includeEmpty: Boolean): Int
 
@@ -80,13 +80,13 @@ interface ThreadDao {
     suspend fun inboxAll(account: String): List<ThreadEntity>
 
     @Query(
-        "SELECT COUNT(*) FROM threads WHERE accountEmail = :account AND (',' || labelsCsv || ',') LIKE '%,' || :labelId || ',%'",
+        "SELECT COUNT(*) FROM threads WHERE accountEmail = :account AND instr(',' || labelsCsv || ',', ',' || :labelId || ',') > 0",
     )
     suspend fun countWithLabel(account: String, labelId: String): Int
 
     @Query(
         """SELECT * FROM threads
-           WHERE accountEmail = :account AND (',' || labelsCsv || ',') LIKE '%,' || :labelId || ',%'
+           WHERE accountEmail = :account AND instr(',' || labelsCsv || ',', ',' || :labelId || ',') > 0
            ORDER BY date DESC LIMIT 200""",
     )
     suspend fun withLabelList(account: String, labelId: String): List<ThreadEntity>

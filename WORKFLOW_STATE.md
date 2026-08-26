@@ -39,19 +39,13 @@ Package: `dev.xxemail`. License target: GPL-3.0-or-later. minSdk 26 / target 35.
       `CancellationException` no longer strands QUEUED rows; delta checkpoint never
       advances past unprocessed items or failed `threads.get`/`messages.get` lookups
       (rewind + follow-up sync).
-
-## Known open findings (non-blocking, from review)
-
-1. Folder label filters use SQLite `LIKE` (ASCII case-fold + `%`/`_` wildcards);
-   switch to `instr(',' || labelsCsv || ',', ',' || :label || ',') > 0` if user labels
-   with `_` or case-colliding ids matter.
-2. `MailRepository.fullCache` (LinkedHashMap) is mutated from IO dispatchers without
-   synchronization — wrap in a mutex or use LruCache.
-3. `TokenCache.clear()` does not take the per-account mutex: a stale in-flight refresh
-   could persist over fresher tokens — add a generation check before persisting.
-4. Exported MainActivity queues AppAuth-shaped intents without validating `state`
-   against the outstanding request — forged redirect intents fail the next sign-in
-   rather than leaking tokens (PKCE), but state validation should be added.
+- [x] Post-review residual findings fixed: label filters switched from SQLite `LIKE`
+      to byte-exact `instr()` (case-fold + `%`/`_` wildcard cross-match gone);
+      `MailRepository.fullCache` mutex-guarded against concurrent IO mutation;
+      `TokenCache.clear()` bumps a per-account generation so a stale in-flight refresh
+      neither persists nor recaches over fresh tokens (regression test added);
+      MainActivity validates redirect OAuth `state` against the outstanding request —
+      forged AppAuth-shaped intents are logged and dropped.
 
 ## Known gaps / next work
 
