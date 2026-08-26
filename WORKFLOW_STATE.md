@@ -39,6 +39,13 @@ Package: `dev.xxemail`. License target: GPL-3.0-or-later. minSdk 26 / target 35.
       `CancellationException` no longer strands QUEUED rows; delta checkpoint never
       advances past unprocessed items or failed `threads.get`/`messages.get` lookups
       (rewind + follow-up sync).
+- [x] Phase G androidTest surface added (branch `androidtest`): `MigrationTest`
+      (v1→2 and v1→3 via `MigrationTestHelper`; asserts historyId INTEGER→TEXT,
+      queued-send rfc822Base64 survival, snoozedUntil survival, snooze_wakes +
+      folder_pages + messages.attachmentsJson) and `TokenStoreTest` (round-trip,
+      remove isolation, failed-persist durability with read-only dir). Schemas wired
+      into androidTest assets; runner + room-testing/test deps in catalog.
+      `compileDebugAndroidTestKotlin` + `testDebugUnitTest` PASS. Device run pending.
 
 ## Known open findings (non-blocking, from review)
 
