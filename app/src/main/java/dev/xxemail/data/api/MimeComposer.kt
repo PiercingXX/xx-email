@@ -1,7 +1,6 @@
 package dev.xxemail.data.api
 
 import jakarta.activation.DataHandler
-import jakarta.activation.FileDataSource
 import jakarta.mail.Message
 import jakarta.mail.Session
 import jakarta.mail.internet.InternetAddress
@@ -25,6 +24,30 @@ object MimeComposer {
 
     /** Gmail hard limit is 25 MB; stay under it accounting for base64 (~33%) inflation. */
     const val MAX_TOTAL_ATTACHMENT_BYTES: Long = 18L * 1024 * 1024
+
+    /**
+     * Builds the References header for a reply: prior References chain + the parent
+     * Message-ID, space-separated (RFC 5322). Duplicates are dropped, order preserved.
+     */
+    fun buildReferences(priorReferences: String?, parentMessageId: String?): String? =
+        listOf(priorReferences, parentMessageId)
+            .mapNotNull { it?.trim()?.takeIf(String::isNotEmpty) }
+            .flatMap { it.split(Regex("\\s+")) }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .joinToString(" ")
+            .ifBlank { null }
+
+    /** DataSource over a file with an explicitly forced content type. */
+    private class TypedFileDataSource(
+        private val file: File,
+        private val type: String,
+    ) : jakarta.activation.DataSource {
+        override fun getInputStream() = file.inputStream()
+        override fun getOutputStream() = file.outputStream()
+        override fun getContentType(): String = type
+        override fun getName(): String = file.name
+    }
 
     fun compose(
         from: String,
@@ -52,8 +75,7 @@ object MimeComposer {
             setSubject(subject, "UTF-8")
             sentDate = Date()
             inReplyToMessageId?.let { setHeader("In-Reply-To", it) }
-            val refs = referencesHeader ?: inReplyToMessageId
-            refs?.let { setHeader("References", it) }
+            buildReferences(referencesHeader, inReplyToMessageId)?.let { setHeader("References", it) }
         }
 
         if (attachments.isEmpty()) {
@@ -64,7 +86,8 @@ object MimeComposer {
             attachments.forEach { att ->
                 multipart.addBodyPart(
                     MimeBodyPart().apply {
-                        dataHandler = DataHandler(FileDataSource(att.file))
+                        // Explicit type wins — FileTypeMap guesses are unreliable off-device.
+                        dataHandler = DataHandler(TypedFileDataSource(att.file, att.mimeType))
                         setFileName(att.file.name)
                     },
                 )

@@ -52,6 +52,14 @@ interface GmailApi {
     @POST("upload/gmail/v1/users/me/messages/send?uploadType=media")
     suspend fun sendRaw(@Body body: okhttp3.RequestBody): Message
 
+    /**
+     * Multipart upload (`uploadType=multipart`): the only messages.send variant that
+     * accepts `threadId`. Body is multipart/related with a {raw, threadId} metadata part
+     * plus the RFC822 part — see [GmailUploads.multipartBody].
+     */
+    @POST("upload/gmail/v1/users/me/messages/send?uploadType=multipart")
+    suspend fun sendMultipart(@Body body: okhttp3.RequestBody): Message
+
     @GET("gmail/v1/users/me/messages/{messageId}/attachments/{attachmentId}")
     suspend fun getAttachment(
         @Path("messageId") messageId: String,

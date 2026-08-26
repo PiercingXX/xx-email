@@ -30,10 +30,12 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -50,14 +52,15 @@ fun ComposeScreen(
     mode: String,
     onDone: () -> Unit,
 ) {
-    val vm = rememberComposeViewModel(account)
+    val vm = rememberComposeViewModel(account, threadId, quoteMessageId, mode)
     val context = LocalContext.current
     var showCcBcc by remember { mutableStateOf(initialCc.isNotBlank()) }
     var scheduleMenu by remember { mutableStateOf(false) }
 
-    remember(account, initialTo, initialCc, initialSubject, threadId, quoteMessageId, mode) {
+    // Prefill is a side effect: run it after composition settles, not inside remember {}
+    // (which re-runs on config changes and wipes in-progress edits — the VM dedupes too).
+    LaunchedEffect(initialTo, initialCc, initialSubject, threadId, quoteMessageId, mode) {
         vm.prefill(initialTo, initialCc, initialSubject, threadId, quoteMessageId, mode)
-        true
     }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -142,6 +145,21 @@ fun ComposeScreen(
                             label = { Text(file.name.substringAfter('-')) },
                             trailingIcon = { Icon(Icons.Filled.Close, "Remove") },
                         )
+                    }
+                }
+            }
+            if (vm.offeredForwardAttachments.isNotEmpty()) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AssistChip(
+                        onClick = { vm.includeOriginalAttachments() },
+                        label = { Text("Include original attachments (${vm.offeredForwardAttachments.size})") },
+                        leadingIcon = { Icon(Icons.Filled.AttachFile, null) },
+                    )
+                    IconButton(onClick = { vm.declineForwardAttachments() }) {
+                        Icon(Icons.Filled.Close, "Don't include attachments")
                     }
                 }
             }

@@ -3,6 +3,7 @@ package dev.xxemail
 import dev.xxemail.data.api.MimeComposer
 import java.util.Base64
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -50,6 +51,48 @@ class MimeComposerTest {
         val decoded = String(Base64.getUrlDecoder().decode(raw), Charsets.UTF_8)
         assertTrue(decoded.contains("In-Reply-To: <abc@example.com>"))
         assertTrue(decoded.contains("References: <abc@example.com>"))
+    }
+
+    @Test
+    fun `references chain is prior chain plus parent message id`() {
+        val raw = MimeComposer.compose(
+            from = "me@example.com",
+            to = listOf("x@example.com"),
+            subject = "Re: deep thread",
+            bodyText = "reply",
+            inReplyToMessageId = "<c@example.com>",
+            referencesHeader = "<a@example.com> <b@example.com>",
+        )
+        val decoded = String(Base64.getUrlDecoder().decode(raw), Charsets.UTF_8)
+        assertTrue(decoded.contains("In-Reply-To: <c@example.com>"))
+        assertTrue(decoded.contains("References: <a@example.com> <b@example.com> <c@example.com>"))
+    }
+
+    @Test
+    fun `buildReferences combines dedups and tolerates missing parts`() {
+        assertEquals("<a@x> <b@x>", MimeComposer.buildReferences("<a@x>", "<b@x>"))
+        assertEquals("<b@x>", MimeComposer.buildReferences(null, "<b@x>"))
+        assertEquals("<a@x>", MimeComposer.buildReferences("<a@x>", null))
+        assertNull(MimeComposer.buildReferences(null, null))
+        // Parent already present in a folded prior chain must not be repeated.
+        assertEquals("<a@x> <b@x>", MimeComposer.buildReferences("<a@x>\n <b@x>", "<b@x>"))
+    }
+
+    @Test
+    fun `attachment content type is applied explicitly not guessed`() {
+        val tmp = File.createTempFile("blob-without-extension", ".bin")
+        tmp.writeBytes(byteArrayOf(1, 2, 3))
+        tmp.deleteOnExit()
+        val raw = MimeComposer.compose(
+            from = "me@example.com",
+            to = listOf("x@example.com"),
+            subject = "typed attachment",
+            bodyText = "b",
+            attachments = listOf(MimeComposer.Attachment(tmp, "image/png")),
+        )
+        val decoded = String(Base64.getUrlDecoder().decode(raw), Charsets.UTF_8)
+        assertTrue(decoded.contains("Content-Type: image/png"))
+        assertTrue(!decoded.substringBefore("\r\n\r\n").contains("application/octet-stream"))
     }
 
     @Test(expected = IllegalArgumentException::class)
