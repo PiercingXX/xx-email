@@ -82,7 +82,15 @@ data class MessageFtsEntity(
     val toCsv: String,
 )
 
-/** Local queue powering undo-send, scheduled send and snooze wake-ups. */
+/**
+ * Local queue powering undo-send, scheduled send and snooze wake-ups.
+ *
+ * Send payloads are stored as files (`files/outbox/{id}.eml`) — [path]/[size] —
+ * so Room never pulls megabytes of RFC822 through a CursorWindow.
+ * [rfc822Base64] is a legacy v0.1 column kept nullable for migration safety:
+ * pre-upgrade QUEUED rows carry only the base64 payload; the worker decodes it,
+ * writes the file, and clears the column.
+ */
 @Entity(tableName = "outbox")
 data class OutboxEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -90,8 +98,12 @@ data class OutboxEntity(
     /** One of [OutboxKind] names. */
     val kind: String,
     val threadId: String? = null,
-    /** base64url RFC822 payload for sends. */
+    /** Legacy v0.1 base64url RFC822 payload; null for new rows after first send attempt. */
     val rfc822Base64: String? = null,
+    /** Relative path (under filesDir) of the file-backed RFC822 payload, when present. */
+    val path: String? = null,
+    /** Payload size in bytes. */
+    val size: Long = 0,
     val subject: String = "",
     /** Epoch ms at which the job should fire (send time / wake time). */
     val targetAt: Long,
@@ -103,4 +115,19 @@ data class OutboxEntity(
 )
 
 enum class OutboxKind { SEND, SCHEDULED_SEND, SNOOZE_WAKE }
+
 enum class OutboxState { QUEUED, SENDING, SENT, WOKEN, FAILED, CANCELLED }
+
+/**
+ * Durable record of a pending snooze wake. Source of truth for [dev.xxemail.sync.SnoozeWorker]:
+ * wakes survive WorkManager input-data loss because the worker can rediscover due
+ * rows here even with empty input data.
+ */
+@Entity(tableName = "snooze_wakes", primaryKeys = ["accountEmail", "threadId"])
+data class SnoozeWakeEntity(
+    val accountEmail: String,
+    val threadId: String,
+    /** Epoch ms at which INBOX should be restored. */
+    val targetAt: Long,
+    val createdAt: Long = System.currentTimeMillis(),
+)

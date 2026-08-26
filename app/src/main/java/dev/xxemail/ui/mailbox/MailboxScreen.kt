@@ -244,6 +244,7 @@ private fun ColumnScope.ThreadListPage(
     if (threads.isEmpty()) {
         EmptyState("Nothing here")
     } else {
+        val canUnsnooze = folder == MailboxFolder.SNOOZED
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             items(threads, key = { it.id }) { thread ->
                 ThreadRow(
@@ -259,6 +260,9 @@ private fun ColumnScope.ThreadListPage(
                     onSwipe = { action ->
                         if (action == SwipeAction.SNOOZE) onSnooze(thread.id) else vm.perform(action, listOf(thread.id))
                     },
+                    onUnsnooze = if (canUnsnooze) {
+                        { vm.unsnooze(thread.id) }
+                    } else null,
                 )
                 HorizontalDivider()
             }

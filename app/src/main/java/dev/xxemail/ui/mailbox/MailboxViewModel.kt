@@ -1,5 +1,6 @@
 package dev.xxemail.ui.mailbox
 
+import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -136,6 +137,15 @@ class MailboxViewModel(
         }
     }
 
+    /** Real unsnooze from the Snoozed folder: cancels wake work + row, restores INBOX. */
+    fun unsnooze(threadId: String) {
+        viewModelScope.launch {
+            runCatching { repo.unsnooze(threadId) }
+                .onFailure { Log.w(TAG, "Unsnooze failed for $threadId", it) }
+            clearSelection()
+        }
+    }
+
     fun applyLabel(labelId: String, add: Boolean, threadIds: List<String>) {
         viewModelScope.launch {
             runCatching { repo.applyLabel(labelId, add, threadIds) }
@@ -155,6 +165,8 @@ class MailboxViewModel(
     private suspend fun snoozeInternal(threadId: String, wakeAt: ZonedDateTime): Undoable =
         repo.snooze(threadId, wakeAt.toInstant().toEpochMilli())
 }
+
+private const val TAG = "MailboxViewModel"
 
 @Composable
 fun rememberMailboxViewModel(account: String): MailboxViewModel {

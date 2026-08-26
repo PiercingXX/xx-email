@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AlarmOn
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Delete
@@ -110,8 +111,12 @@ fun ThreadScreen(
                     IconButton(onClick = { vm.archive(); onBack() }) { Icon(Icons.Filled.Archive, "Archive") }
                     IconButton(onClick = { vm.trash(); onBack() }) { Icon(Icons.Filled.Delete, "Delete") }
                     IconButton(onClick = { vm.markUnread(); onBack() }) { Icon(Icons.Filled.MarkEmailUnread, "Mark unread") }
-                    IconButton(onClick = { vm.snooze(SnoozePresets.tomorrowMorning(ZonedDateTime.now()).toInstant().toEpochMilli()); onBack() }) {
-                        Icon(Icons.Filled.Schedule, "Snooze until tomorrow")
+                    if (row?.snoozedUntil != null) {
+                        IconButton(onClick = { vm.unsnooze(); onBack() }) { Icon(Icons.Filled.AlarmOn, "Unsnooze") }
+                    } else {
+                        IconButton(onClick = { vm.snooze(SnoozePresets.tomorrowMorning(ZonedDateTime.now()).toInstant().toEpochMilli()); onBack() }) {
+                            Icon(Icons.Filled.Schedule, "Snooze until tomorrow")
+                        }
                     }
                 }
             }

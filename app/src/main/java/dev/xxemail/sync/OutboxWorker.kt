@@ -5,13 +5,21 @@ import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import dev.xxemail.XxEmailApp
+import dev.xxemail.data.db.OutboxEntity
 import dev.xxemail.data.db.OutboxState
+import java.io.File
+import java.io.IOException
+import java.util.Base64
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * Sends queued RFC822 payloads. The undo window / schedule delay is expressed as the
  * WorkRequest's initialDelay, so cancelling the unique work == undo.
+ *
+ * Payload bytes come from `files/outbox/{id}.eml` (see [OutboxFiles]); legacy v0.1 rows
+ * carrying only `rfc822Base64` are decoded, persisted to a file, and their column cleared,
+ * so upgraded queues keep sending.
  */
 class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
 
@@ -33,13 +41,14 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
         dao.incrementAttempts(id)
         val attemptsUsed = entry.attempts + 1
         return try {
-            val raw = requireNotNull(entry.rfc822Base64) { "missing payload" }
-            val bytes = java.util.Base64.getUrlDecoder().decode(raw)
+            val bytes = resolvePayload(applicationContext.filesDir, dao, entry)
             val repo = graph.mailRepository(entry.accountEmail)
             graph.gmailApi(entry.accountEmail).sendRaw(bytes.toRequestBody("message/rfc822".toMediaType()))
             // SENT is recorded BEFORE any post-send work (archiveAfterSend): if archiving
             // throws or the process dies here, the message must never be sent again.
             dao.setState(id, OutboxState.SENT.name)
+            // Payload no longer needed once SENT — keep only on FAILED so users can retry.
+            OutboxFiles.deletePayloadFile(applicationContext.filesDir, entry.path, entry.id)
             if (graph.settings.sendAndArchive()) {
                 runCatching { repo.archiveAfterSend(entry.threadId) }
                     .onFailure { Log.w(TAG, "Post-send archive failed for outbox #$id", it) }
@@ -53,7 +62,7 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
             // decoding means the server answered 2xx: the send succeeded even though the
             // response could not be decoded. Never retry a message that left the device.
             applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = 200, transportError = false), null)
-        } catch (e: java.io.IOException) {
+        } catch (e: IOException) {
             Log.w(TAG, "Send transport error for outbox #$id (attempt $attemptsUsed)", e)
             applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = null, transportError = true), e.message)
         } catch (e: Throwable) {
@@ -61,6 +70,28 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
             applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = null, transportError = true), e.message)
         }
     }
+
+    /**
+     * Prefers the file-backed payload; falls back to the legacy base64 column for rows
+     * migrated from v0.1 (decoded bytes are then persisted to disk and the column cleared
+     * to get them off CursorWindow-sized reads).
+     */
+    private suspend fun resolvePayload(filesDir: File, dao: dev.xxemail.data.db.OutboxDao, entry: OutboxEntity): ByteArray =
+        when {
+            entry.path != null ->
+                OutboxFiles.resolve(filesDir, entry.path)?.readBytes()
+                    ?: throw IOException("Outbox #${entry.id} payload file is missing (${entry.path})")
+            entry.rfc822Base64 != null -> {
+                val bytes = Base64.getUrlDecoder().decode(entry.rfc822Base64)
+                runCatching {
+                    val rel = OutboxFiles.writeNew(filesDir, entry.id, bytes)
+                    dao.setPayload(entry.id, rel, bytes.size.toLong())
+                    dao.clearLegacyPayload(entry.id)
+                }.onFailure { Log.w(TAG, "Could not migrate outbox #${entry.id} payload to file", it) }
+                bytes
+            }
+            else -> throw IOException("Outbox #${entry.id} has neither payload file nor legacy base64")
+        }
 
     /** Applies a [SendRetryPolicy.Outcome] to the outbox row and the WorkManager result. */
     private suspend fun applyOutcome(
@@ -89,28 +120,60 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
         private const val TAG = "OutboxWorker"
         const val KEY_OUTBOX_ID = "outbox_id"
         const val MAX_ATTEMPTS = 5
+
+        fun workName(outboxId: Long): String = "outbox-$outboxId"
     }
 }
 
-/** Wakes a snoozed thread back into the inbox at its scheduled time. */
+/**
+ * Wakes a snoozed thread back into the inbox at its scheduled time.
+ *
+ * The `snooze_wakes` table is the source of truth: input data is a fast path, and when it
+ * is missing the worker drains all due wake rows instead. Requires network and retries
+ * until every wake succeeds — an un-woken snooze means mail silently stuck out of the inbox.
+ */
 class SnoozeWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
         val graph = (applicationContext as XxEmailApp).graph
-        val account = inputData.getString(KEY_ACCOUNT) ?: return Result.failure()
-        val threadId = inputData.getString(KEY_THREAD_ID) ?: return Result.failure()
-        return try {
-            graph.mailRepository(account).unsnooze(threadId)
-            Result.success()
-        } catch (t: Throwable) {
-            Log.w(TAG, "Unsnooze failed for $threadId", t)
-            if (runAttemptCount < 3) Result.retry() else Result.failure()
+        val wakeDao = graph.db.snoozeWakeDao()
+        val now = System.currentTimeMillis()
+
+        val account = inputData.getString(KEY_ACCOUNT)
+        val threadId = inputData.getString(KEY_THREAD_ID)
+        val targets = if (account != null && threadId != null) {
+            val wake = wakeDao.get(account, threadId) ?: return Result.success() // unsnoozed early
+            if (wake.targetAt > now) return Result.retry() // fired early — wait via backoff
+            listOf(wake)
+        } else {
+            // Input data lost — recover from the durable table (all accounts).
+            val due = wakeDao.due(now)
+            if (due.isEmpty()) return Result.success()
+            due
         }
+
+        var failed = false
+        targets.forEach { wake ->
+            try {
+                // restoreFromSnooze (not unsnooze) — cancelling our own running work would
+                // interrupt the restore mid-flight.
+                graph.mailRepository(wake.accountEmail).restoreFromSnooze(wake.threadId)
+            } catch (t: Throwable) {
+                failed = true
+                Log.w(TAG, "Wake failed for ${wake.accountEmail}/${wake.threadId}", t)
+            }
+        }
+        return if (failed) Result.retry() else Result.success()
     }
 
     companion object {
         private const val TAG = "SnoozeWorker"
         const val KEY_ACCOUNT = "account"
         const val KEY_THREAD_ID = "thread_id"
+
+        /** Tag applied to every wake request so per-account cancellation stays easy. */
+        const val WORK_TAG = "snooze-wake"
+
+        fun workName(account: String, threadId: String): String = "snooze-$account-$threadId"
     }
 }

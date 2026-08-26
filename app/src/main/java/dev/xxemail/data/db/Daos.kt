@@ -53,6 +53,9 @@ interface ThreadDao {
     @Query("SELECT * FROM threads WHERE accountEmail = :account AND snoozedUntil IS NOT NULL ORDER BY snoozedUntil ASC")
     fun observeSnoozed(account: String): Flow<List<ThreadEntity>>
 
+    @Query("SELECT * FROM threads WHERE accountEmail = :account AND snoozedUntil IS NOT NULL ORDER BY snoozedUntil ASC")
+    suspend fun snoozedList(account: String): List<ThreadEntity>
+
     @Query(
         """SELECT * FROM threads
            WHERE accountEmail = :account AND labelsCsv LIKE '%' || :labelId || '%'
@@ -137,8 +140,31 @@ interface OutboxDao {
     suspend fun setState(id: Long, state: String, error: String? = null)
     @Query("UPDATE outbox SET attempts = attempts + 1 WHERE id = :id")
     suspend fun incrementAttempts(id: Long)
+    @Query("UPDATE outbox SET path = :path, size = :size WHERE id = :id")
+    suspend fun setPayload(id: Long, path: String?, size: Long)
+    @Query("UPDATE outbox SET rfc822Base64 = NULL WHERE id = :id")
+    suspend fun clearLegacyPayload(id: Long)
+    @Query("SELECT id FROM outbox WHERE accountEmail = :account AND state = 'QUEUED'")
+    suspend fun queuedIdsForAccount(account: String): List<Long>
+    @Query("SELECT * FROM outbox WHERE accountEmail = :account")
+    suspend fun listForAccount(account: String): List<OutboxEntity>
     @Query("DELETE FROM outbox WHERE id = :id")
     suspend fun delete(id: Long)
     @Query("DELETE FROM outbox WHERE accountEmail = :account")
+    suspend fun deleteForAccount(account: String)
+}
+
+@Dao
+interface SnoozeWakeDao {
+    @Upsert suspend fun upsert(wake: SnoozeWakeEntity)
+    @Query("SELECT * FROM snooze_wakes WHERE accountEmail = :account AND threadId = :threadId")
+    suspend fun get(account: String, threadId: String): SnoozeWakeEntity?
+    @Query("SELECT * FROM snooze_wakes WHERE targetAt <= :now ORDER BY targetAt ASC")
+    suspend fun due(now: Long): List<SnoozeWakeEntity>
+    @Query("SELECT * FROM snooze_wakes WHERE accountEmail = :account ORDER BY targetAt ASC")
+    suspend fun listForAccount(account: String): List<SnoozeWakeEntity>
+    @Query("DELETE FROM snooze_wakes WHERE accountEmail = :account AND threadId = :threadId")
+    suspend fun delete(account: String, threadId: String)
+    @Query("DELETE FROM snooze_wakes WHERE accountEmail = :account")
     suspend fun deleteForAccount(account: String)
 }

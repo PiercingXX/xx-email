@@ -50,6 +50,9 @@ android {
     testOptions { unitTests.isIncludeAndroidResources = false }
 }
 
+// Room schema exports (committed under app/schemas/) power migration review in diffs.
+ksp { arg("room.schemaLocation", "$projectDir/schemas") }
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

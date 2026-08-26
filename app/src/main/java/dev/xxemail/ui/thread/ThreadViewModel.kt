@@ -1,5 +1,6 @@
 package dev.xxemail.ui.thread
 
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.LocalContext
@@ -65,6 +66,14 @@ class ThreadViewModel(
     fun snooze(wakeAtMs: Long) = launchUndo { repo.snooze(threadId, wakeAtMs) }
     fun applyLabel(labelId: String, add: Boolean) = launchUndo { repo.applyLabel(labelId, add, listOf(threadId)) }
 
+    /** Real unsnooze (cancels wake work + row, restores INBOX). No undo — snoozing again is one tap. */
+    fun unsnooze() {
+        viewModelScope.launch {
+            runCatching { repo.unsnooze(threadId) }
+                .onFailure { Log.w(TAG, "Unsnooze failed for $threadId", it) }
+        }
+    }
+
     private fun launchUndo(block: suspend () -> Undoable) {
         viewModelScope.launch { _undoEvents.emit(block()) }
     }
@@ -78,3 +87,5 @@ fun rememberThreadViewModel(account: String, threadId: String): ThreadViewModel 
         factory = viewModelFactory { initializer { ThreadViewModel(graph, account, threadId) } },
     )
 }
+
+private const val TAG = "ThreadViewModel"

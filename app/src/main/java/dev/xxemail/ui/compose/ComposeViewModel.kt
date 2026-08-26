@@ -2,6 +2,7 @@ package dev.xxemail.ui.compose
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -14,13 +15,17 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import dev.xxemail.appGraph
+import dev.xxemail.data.api.MimeComposer
 import dev.xxemail.data.repo.ComposeRequest
 import dev.xxemail.di.AppGraph
+import dev.xxemail.domain.SafePaths
 import dev.xxemail.ui.components.SendEvents
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.time.DayOfWeek
 import java.time.ZonedDateTime
 
@@ -78,15 +83,44 @@ class ComposeViewModel(
         }
     }
 
+    /**
+     * Copies the selected document into `cacheDir/uploads` under a sanitized name.
+     * Provider-supplied display names are reduced to a safe single path segment, the
+     * target is verified inside the uploads directory, and copying is capped at
+     * [MAX_UPLOAD_BYTES] so a huge file cannot exhaust memory/disk.
+     */
     fun addAttachment(context: Context, uri: Uri, displayName: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val dir = File(context.cacheDir, "uploads").apply { mkdirs() }
-            val target = File(dir, "${System.currentTimeMillis()}-$displayName")
+            val name = SafePaths.childNameOr(
+                raw = displayName,
+                fallbackSeed = uri.lastPathSegment,
+                lastResort = "upload-${System.currentTimeMillis()}",
+            )
+            val target = File(dir, "${System.currentTimeMillis()}-$name")
             runCatching {
+                check(SafePaths.isInside(dir, target)) { "Resolved upload path escapes the uploads directory" }
                 context.contentResolver.openInputStream(uri)?.use { input ->
-                    target.outputStream().use { output -> input.copyTo(output) }
-                }
+                    BufferedOutputStream(FileOutputStream(target)).use { output ->
+                        val buf = ByteArray(COPY_BUFFER_BYTES)
+                        var total = 0L
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            total += n
+                            check(total <= MAX_UPLOAD_BYTES) {
+                                "Attachment exceeds the ${MAX_UPLOAD_BYTES / 1024 / 1024} MB limit"
+                            }
+                            output.write(buf, 0, n)
+                        }
+                    }
+                } ?: error("Could not open the selected file")
             }.onSuccess { if (target.exists()) attachments.add(target) }
+                .onFailure { t ->
+                    Log.w(TAG, "Attachment failed for $displayName", t)
+                    target.delete()
+                    error = t.message ?: "Could not attach file"
+                }
         }
     }
 
@@ -128,6 +162,12 @@ class ComposeViewModel(
     }
 
     companion object {
+        private const val TAG = "ComposeViewModel"
+        private const val COPY_BUFFER_BYTES = 64 * 1024
+
+        /** Per-file cap mirrors the compose-time total attachment budget. */
+        val MAX_UPLOAD_BYTES: Long = MimeComposer.MAX_TOTAL_ATTACHMENT_BYTES
+
         fun splitAddresses(raw: String): List<String> =
             raw.split(',', ';').map { it.trim() }.filter { it.contains('@') }
 

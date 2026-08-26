@@ -23,10 +23,21 @@ class AppGraph(context: Context) {
     val db: XxEmailDb = XxEmailDb.build(appContext)
     val tokens: TokenStore = TokenStore(appContext.filesDir)
     val auth: AuthRepository = AuthRepository(appContext, tokens, settings)
-    val accounts: AccountRepository =
-        AccountRepository(db.accountDao(), db.threadDao(), db.messageDao(), db.labelDao(), db.outboxDao(), tokens)
 
     val workManager: WorkManager by lazy { WorkManager.getInstance(appContext) }
+
+    val accounts: AccountRepository = AccountRepository(
+        accountDao = db.accountDao(),
+        threadDao = db.threadDao(),
+        messageDao = db.messageDao(),
+        labelDao = db.labelDao(),
+        outboxDao = db.outboxDao(),
+        wakeDao = db.snoozeWakeDao(),
+        tokens = tokens,
+        apiProvider = ::gmailApi,
+        workManager = workManager,
+        filesDir = appContext.filesDir,
+    )
 
     private val apiCache = HashMap<String, GmailApi>()
     private val mailRepoCache = HashMap<String, MailRepository>()
@@ -46,6 +57,7 @@ class AppGraph(context: Context) {
                 threadDao = db.threadDao(),
                 messageDao = db.messageDao(),
                 outboxDao = db.outboxDao(),
+                wakeDao = db.snoozeWakeDao(),
                 settings = settings,
                 workManager = workManager,
                 appContext = appContext,

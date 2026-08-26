@@ -67,7 +67,11 @@ Known trade-offs (honest ones):
 - While snoozed, mail leaves every client's inbox (INBOX removed server-side);
   wake state itself lives only on this device. **If you uninstall the app while mail is
   snoozed, it will not return to your inbox automatically** — it remains reachable via
-  All Mail / search on any client. Unsnooze before uninstalling.
+  All Mail / search on any client. Unsnooze before uninstalling. The same applies when
+  removing an account while offline: removal restores snoozed mail to the inbox on a
+  best-effort basis and warns if it could not, and if a scheduled wake repeatedly fails
+  (e.g. long offline periods) the thread stays in the Snoozed folder where you can
+  unsnooze it manually.
 
 ## Roadmap
 

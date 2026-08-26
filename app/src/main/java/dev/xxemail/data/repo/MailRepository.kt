@@ -24,10 +24,14 @@ import dev.xxemail.data.db.OutboxDao
 import dev.xxemail.data.db.OutboxEntity
 import dev.xxemail.data.db.OutboxKind
 import dev.xxemail.data.db.OutboxState
+import dev.xxemail.data.db.SnoozeWakeDao
+import dev.xxemail.data.db.SnoozeWakeEntity
 import dev.xxemail.data.db.ThreadDao
 import dev.xxemail.data.db.ThreadEntity
 import dev.xxemail.domain.AddressUtils
 import dev.xxemail.domain.MailboxFolder
+import dev.xxemail.domain.SafePaths
+import dev.xxemail.sync.OutboxFiles
 import dev.xxemail.sync.OutboxWorker
 import dev.xxemail.sync.SnoozeWorker
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +39,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import java.io.File
+import java.io.FileOutputStream
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 
@@ -61,6 +66,7 @@ class MailRepository(
     private val threadDao: ThreadDao,
     private val messageDao: MessageDao,
     private val outboxDao: OutboxDao,
+    private val wakeDao: SnoozeWakeDao,
     private val settings: SettingsRepository,
     private val workManager: WorkManager,
     private val appContext: Context,
@@ -312,11 +318,46 @@ class MailRepository(
         result
     }
 
+    /**
+     * Downloads an attachment to `cacheDir/attachments` under a sanitized name.
+     * Server-controlled filenames are reduced to a safe single path segment and the
+     * resolved file is verified to stay inside the attachments directory; decoded
+     * bytes are streamed with a hard cap so a huge part cannot OOM the app.
+     */
     suspend fun downloadAttachment(meta: AttachmentMeta): File = withContext(Dispatchers.IO) {
         val att = api.getAttachment(meta.messageId, meta.attachmentId)
-        val bytes = Base64.getUrlDecoder().decode(att.data.orEmpty())
+        val data = requireNotNull(att.data) { "Attachment ${meta.attachmentId} has no data" }
+        require(att.size <= MAX_DOWNLOAD_BYTES) {
+            "Attachment ${meta.filename} (${att.size / 1024 / 1024} MB) exceeds the " +
+                "${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB limit"
+        }
         val dir = File(appContext.cacheDir, "attachments").apply { mkdirs() }
-        File(dir, meta.filename.ifBlank { "attachment-${meta.attachmentId}" }).apply { writeBytes(bytes) }
+        val name = SafePaths.childNameOr(
+            raw = meta.filename,
+            fallbackSeed = "attachment-${meta.attachmentId}",
+            lastResort = "attachment-${Integer.toHexString(meta.attachmentId.hashCode())}",
+        )
+        val target = File(dir, name)
+        check(SafePaths.isInside(dir, target)) { "Resolved attachment path escapes the attachments directory" }
+        try {
+            Base64.getUrlDecoder().wrap(data.byteInputStream()).use { decoded ->
+                FileOutputStream(target).use { output ->
+                    val buf = ByteArray(COPY_BUFFER_BYTES)
+                    var written = 0L
+                    while (true) {
+                        val n = decoded.read(buf)
+                        if (n < 0) break
+                        written += n
+                        check(written <= MAX_DOWNLOAD_BYTES) { "Attachment exceeds the download size limit" }
+                        output.write(buf, 0, n)
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            target.delete()
+            throw t
+        }
+        target
     }
 
     suspend fun messageSnapshot(messageId: String): MessageEntity? =
@@ -386,29 +427,71 @@ class MailRepository(
 
     /**
      * Local-only snooze: INBOX is removed server-side so the mail leaves every client's inbox;
-     * our SnoozeWorker re-adds INBOX at [wakeAt]. Wake state itself lives only on this device.
+     * our SnoozeWorker re-adds INBOX at [wakeAt]. The wake time is persisted in `snooze_wakes`
+     * (source of truth) so it survives WorkManager input-data loss; the WorkRequest input data
+     * is only a fast path.
      */
     suspend fun snooze(threadId: String, wakeAt: Long): Undoable {
         threadDao.setSnoozed(accountEmail, threadId, wakeAt)
         api.modifyThread(threadId, ModifyLabelsRequest(removeLabelIds = listOf("INBOX")))
         threadDao.setInInbox(accountEmail, threadId, false)
-        val delay = (wakeAt - System.currentTimeMillis()).coerceAtLeast(0)
-        workManager.enqueueUniqueWork(
-            "snooze-$accountEmail-$threadId",
-            ExistingWorkPolicy.REPLACE,
-            OneTimeWorkRequestBuilder<SnoozeWorker>()
-                .setInputData(workDataOf(SnoozeWorker.KEY_ACCOUNT to accountEmail, SnoozeWorker.KEY_THREAD_ID to threadId))
-                .setInitialDelay(delay, TimeUnit.MILLISECONDS)
-                .build(),
-        )
+        wakeDao.upsert(SnoozeWakeEntity(accountEmail = accountEmail, threadId = threadId, targetAt = wakeAt))
+        scheduleWake(threadId, wakeAt)
         return Undoable("Snoozed") { unsnooze(threadId) }
     }
 
+    /**
+     * Real unsnooze: cancels the wake work and row, restores INBOX locally first (immediate
+     * UI feedback), then server-side. On server failure the local state and wake row are
+     * rolled back and the exception propagates so callers can surface it.
+     */
     suspend fun unsnooze(threadId: String) {
-        workManager.cancelUniqueWork("snooze-$accountEmail-$threadId")
+        workManager.cancelUniqueWork(SnoozeWorker.workName(accountEmail, threadId))
+        restoreFromSnooze(threadId)
+    }
+
+    /**
+     * Shared restore path for manual unsnooze and the SnoozeWorker (which must NOT cancel
+     * its own running work). Clears the wake row and snooze state, restores INBOX locally
+     * first, then server-side; rolls everything back if the server call fails.
+     */
+    suspend fun restoreFromSnooze(threadId: String) {
+        val before = threadDao.get(accountEmail, threadId)
+        wakeDao.delete(accountEmail, threadId)
         threadDao.setSnoozed(accountEmail, threadId, null)
-        api.modifyThread(threadId, ModifyLabelsRequest(addLabelIds = listOf("INBOX")))
         threadDao.setInInbox(accountEmail, threadId, true)
+        try {
+            api.modifyThread(threadId, ModifyLabelsRequest(addLabelIds = listOf("INBOX")))
+        } catch (t: Throwable) {
+            Log.w(TAG, "Unsnooze server call failed for $threadId — rolling back", t)
+            before?.let {
+                threadDao.setSnoozed(accountEmail, threadId, it.snoozedUntil)
+                threadDao.setInInbox(accountEmail, threadId, it.inInbox)
+                if (it.snoozedUntil != null) {
+                    wakeDao.upsert(
+                        SnoozeWakeEntity(accountEmail = accountEmail, threadId = threadId, targetAt = it.snoozedUntil),
+                    )
+                    scheduleWake(threadId, it.snoozedUntil)
+                }
+            }
+            throw t
+        }
+    }
+
+    private fun scheduleWake(threadId: String, wakeAt: Long) {
+        val delay = (wakeAt - System.currentTimeMillis()).coerceAtLeast(0)
+        workManager.enqueueUniqueWork(
+            SnoozeWorker.workName(accountEmail, threadId),
+            ExistingWorkPolicy.REPLACE,
+            OneTimeWorkRequestBuilder<SnoozeWorker>()
+                // Convenience only — the worker falls back to the snooze_wakes table.
+                .setInputData(workDataOf(SnoozeWorker.KEY_ACCOUNT to accountEmail, SnoozeWorker.KEY_THREAD_ID to threadId))
+                .setInitialDelay(delay, TimeUnit.MILLISECONDS)
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+                .addTag(SnoozeWorker.WORK_TAG)
+                .build(),
+        )
     }
 
     // ------------------------------------------------------------------ sending
@@ -420,6 +503,7 @@ class MailRepository(
      * Returns the outbox row id (used by undo).
      */
     suspend fun enqueueSend(request: ComposeRequest, scheduledAt: Long? = null): Long = withContext(Dispatchers.IO) {
+        // MimeComposer enforces MAX_TOTAL_ATTACHMENT_BYTES at compose time.
         val raw = MimeComposer.compose(
             from = accountEmail,
             to = request.to,
@@ -431,6 +515,7 @@ class MailRepository(
             referencesHeader = request.referencesHeader,
             attachments = request.attachmentFiles.map { MimeComposer.Attachment(it, guessMime(it.name)) },
         )
+        val bytes = Base64.getUrlDecoder().decode(raw)
         val targetAt = scheduledAt ?: (System.currentTimeMillis() + settings.undoSeconds() * 1000L)
         val kind = if (scheduledAt == null) OutboxKind.SEND else OutboxKind.SCHEDULED_SEND
         val id = outboxDao.insert(
@@ -438,14 +523,21 @@ class MailRepository(
                 accountEmail = accountEmail,
                 kind = kind.name,
                 threadId = request.threadId,
-                rfc822Base64 = raw,
+                rfc822Base64 = null, // payloads live on disk now; legacy column stays for migrated rows
                 subject = request.subject,
                 targetAt = targetAt,
             ),
         )
+        val relativePath = try {
+            OutboxFiles.writeNew(appContext.filesDir, id, bytes)
+        } catch (t: Throwable) {
+            outboxDao.delete(id)
+            throw t
+        }
+        outboxDao.setPayload(id, relativePath, bytes.size.toLong())
         val delay = (targetAt - System.currentTimeMillis()).coerceAtLeast(0)
         workManager.enqueueUniqueWork(
-            "outbox-$id",
+            OutboxWorker.workName(id),
             ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<OutboxWorker>()
                 .setInputData(workDataOf(OutboxWorker.KEY_OUTBOX_ID to id))
@@ -460,8 +552,11 @@ class MailRepository(
 
     /** Undo-send / cancel scheduled send: cancel the pending worker and drop the queued row. */
     suspend fun cancelQueuedSend(outboxId: Long) {
-        workManager.cancelUniqueWork("outbox-$outboxId")
+        workManager.cancelUniqueWork(OutboxWorker.workName(outboxId))
         outboxDao.setState(outboxId, OutboxState.CANCELLED.name)
+        outboxDao.get(outboxId)?.let { entry ->
+            OutboxFiles.deletePayloadFile(appContext.filesDir, entry.path, entry.id)
+        }
         outboxDao.delete(outboxId)
     }
 
@@ -604,5 +699,9 @@ class MailRepository(
     companion object {
         private const val TAG = "MailRepository"
         private const val MAX_THREADS_PER_DELTA = 60
+
+        /** Decoded-attachment memory cap (reuses the compose-time attachment budget). */
+        val MAX_DOWNLOAD_BYTES: Long = MimeComposer.MAX_TOTAL_ATTACHMENT_BYTES
+        private const val COPY_BUFFER_BYTES = 64 * 1024
     }
 }

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AlarmOn
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Delete
@@ -189,6 +190,7 @@ fun ThreadRow(
     rightAction: SwipeAction,
     onSwipe: (SwipeAction) -> Unit,
     modifier: Modifier = Modifier,
+    onUnsnooze: (() -> Unit)? = null,
 ) {
     SwipeableRow(leftAction = leftAction, rightAction = rightAction, onAction = onSwipe, modifier = modifier) {
         Surface(color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface) {
@@ -242,6 +244,15 @@ fun ThreadRow(
                         modifier = Modifier.size(16.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+                if (onUnsnooze != null) {
+                    IconButton(onClick = onUnsnooze) {
+                        Icon(
+                            imageVector = Icons.Filled.AlarmOn,
+                            contentDescription = "Unsnooze",
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
                 IconButton(onClick = onStarToggle) {
                     Icon(
