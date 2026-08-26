@@ -46,6 +46,10 @@ class MailboxViewModel(
 
     val labels = repo.observeLabels()
 
+    /** Sends that permanently failed (4xx / attempts exhausted) — shown as a banner. */
+    val failedSends: StateFlow<Int> = repo.observeFailedSends()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
     private val folderFlows = HashMap<MailboxFolder, StateFlow<List<ThreadEntity>>>()
 
     init {

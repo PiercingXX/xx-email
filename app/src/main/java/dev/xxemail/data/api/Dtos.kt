@@ -6,7 +6,8 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class Profile(
     val emailAddress: String,
-    @SerialName("historyId") val historyId: Long? = null,
+    // Gmail historyId is an unsigned 64-bit int — modeled as String to avoid Long overflow.
+    @SerialName("historyId") val historyId: String? = null,
     val messagesTotal: Int? = null,
     val threadsTotal: Int? = null,
 )
@@ -39,7 +40,7 @@ data class ListResponse(
 )
 
 @Serializable
-data class ThreadRef(val id: String, val snippet: String? = null, val historyId: Long? = null)
+data class ThreadRef(val id: String, val snippet: String? = null, val historyId: String? = null)
 
 @Serializable
 data class ThreadListResponse(
@@ -70,7 +71,7 @@ data class Message(
     val threadId: String? = null,
     val labelIds: List<String> = emptyList(),
     val snippet: String? = null,
-    val historyId: Long? = null,
+    val historyId: String? = null,
     val internalDate: String? = null, // ms since epoch as string
     val payload: MessagePart? = null,
     val sizeEstimate: Int? = null,
@@ -80,7 +81,7 @@ data class Message(
 data class Thread(
     val id: String,
     val snippet: String? = null,
-    val historyId: Long? = null,
+    val historyId: String? = null,
     val messages: List<Message> = emptyList(),
 )
 
@@ -114,7 +115,8 @@ data class HistoryLabelChange(
 
 @Serializable
 data class HistoryItem(
-    val id: Long,
+    // Unsigned 64-bit history sequence number — kept as String, never arithmetic.
+    val id: String,
     val messages: List<HistoryMessageAdded> = emptyList(),
     val messagesAdded: List<HistoryMessageAdded> = emptyList(),
     val messagesDeleted: List<HistoryMessageAdded> = emptyList(),
@@ -125,7 +127,7 @@ data class HistoryItem(
 @Serializable
 data class HistoryResponse(
     val history: List<HistoryItem> = emptyList(),
-    val historyId: Long? = null,
+    val historyId: String? = null,
     val nextPageToken: String? = null,
 )
 

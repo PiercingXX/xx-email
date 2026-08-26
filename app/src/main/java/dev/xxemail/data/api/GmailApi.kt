@@ -60,7 +60,7 @@ interface GmailApi {
 
     @GET("gmail/v1/users/me/history")
     suspend fun listHistory(
-        @Query("startHistoryId") startHistoryId: Long,
+        @Query("startHistoryId") startHistoryId: String,
         @Query("maxResults") maxResults: Int = 100,
         @Query("pageToken") pageToken: String? = null,
     ): HistoryResponse

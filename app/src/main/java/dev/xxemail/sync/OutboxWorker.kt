@@ -31,25 +31,58 @@ class OutboxWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
 
         dao.setState(id, OutboxState.SENDING.name)
         dao.incrementAttempts(id)
+        val attemptsUsed = entry.attempts + 1
         return try {
             val raw = requireNotNull(entry.rfc822Base64) { "missing payload" }
             val bytes = java.util.Base64.getUrlDecoder().decode(raw)
             val repo = graph.mailRepository(entry.accountEmail)
-            val sent = graph.gmailApi(entry.accountEmail).sendRaw(bytes.toRequestBody("message/rfc822".toMediaType()))
+            graph.gmailApi(entry.accountEmail).sendRaw(bytes.toRequestBody("message/rfc822".toMediaType()))
+            // SENT is recorded BEFORE any post-send work (archiveAfterSend): if archiving
+            // throws or the process dies here, the message must never be sent again.
             dao.setState(id, OutboxState.SENT.name)
-            if (graph.settings.sendAndArchive()) repo.archiveAfterSend(sent.threadId ?: entry.threadId)
+            if (graph.settings.sendAndArchive()) {
+                runCatching { repo.archiveAfterSend(entry.threadId) }
+                    .onFailure { Log.w(TAG, "Post-send archive failed for outbox #$id", it) }
+            }
             Log.i(TAG, "Sent outbox #$id (${entry.subject})")
             Result.success()
-        } catch (t: Throwable) {
-            Log.w(TAG, "Send failed for outbox #$id (attempt ${entry.attempts + 1})", t)
-            if (entry.attempts + 1 >= MAX_ATTEMPTS) {
-                dao.setState(id, OutboxState.FAILED.name, t.message)
+        } catch (e: retrofit2.HttpException) {
+            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = e.code(), transportError = false), e.message)
+        } catch (e: kotlinx.serialization.SerializationException) {
+            // A non-2xx response would have surfaced as HttpException, so reaching body
+            // decoding means the server answered 2xx: the send succeeded even though the
+            // response could not be decoded. Never retry a message that left the device.
+            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = 200, transportError = false), null)
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "Send transport error for outbox #$id (attempt $attemptsUsed)", e)
+            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = null, transportError = true), e.message)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Send failed for outbox #$id (attempt $attemptsUsed)", e)
+            applyOutcome(dao, id, attemptsUsed, SendRetryPolicy.decide(httpCode = null, transportError = true), e.message)
+        }
+    }
+
+    /** Applies a [SendRetryPolicy.Outcome] to the outbox row and the WorkManager result. */
+    private suspend fun applyOutcome(
+        dao: dev.xxemail.data.db.OutboxDao,
+        id: Long,
+        attemptsUsed: Int,
+        outcome: SendRetryPolicy.Outcome,
+        error: String?,
+    ): Result = when (outcome) {
+        SendRetryPolicy.Outcome.MARK_SENT -> Result.success()
+        SendRetryPolicy.Outcome.MARK_FAILED -> {
+            dao.setState(id, OutboxState.FAILED.name, error)
+            Result.failure()
+        }
+        SendRetryPolicy.Outcome.RETRY ->
+            if (attemptsUsed >= MAX_ATTEMPTS) {
+                dao.setState(id, OutboxState.FAILED.name, error)
                 Result.failure()
             } else {
                 dao.setState(id, OutboxState.QUEUED.name)
                 Result.retry()
             }
-        }
     }
 
     companion object {

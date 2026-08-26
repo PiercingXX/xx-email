@@ -8,7 +8,8 @@ import androidx.room.PrimaryKey
 data class AccountEntity(
     @PrimaryKey val email: String,
     val displayName: String = "",
-    val historyId: Long? = null,
+    /** Last processed Gmail history id (uint64 stored as string — never arithmetic). */
+    val historyId: String? = null,
     val lastSyncAt: Long? = null,
 )
 

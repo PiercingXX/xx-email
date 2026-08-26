@@ -150,21 +150,26 @@ class MailRepository(
 
     /**
      * Delta sync via history.list (2 quota units). Affected threads are rebuilt wholesale
-     * from threads.get (10 units each, capped per pass; overflow triggers a follow-up pass).
+     * from threads.get (10 units each, capped per pass; overflow stops paging so the next
+     * pass resumes at the last fully processed history id).
      * HTTP 404 ⇒ stored historyId expired ⇒ bounded full resync.
+     *
+     * History ids are opaque uint64 strings from Gmail — they are only ever compared or
+     * persisted verbatim, never arithmetically.
      */
-    private suspend fun deltaSync(startHistoryId: Long, fallbackEnd: Long) {
+    private suspend fun deltaSync(startHistoryId: String, fallbackEnd: String?) {
         val touchedThreadIds = LinkedHashSet<String>()
         val messageIdsNeedingLookup = LinkedHashSet<String>()
         val deletedMessageIds = LinkedHashSet<String>()
-        var newestHistoryId = startHistoryId
+        var lastProcessedId = startHistoryId
+        var sawAnyItem = false
         var pageToken: String? = null
 
         try {
             do {
                 val page = api.listHistory(startHistoryId = startHistoryId, pageToken = pageToken)
                 page.history.forEach { item ->
-                    newestHistoryId = maxOf(newestHistoryId, item.id)
+                    sawAnyItem = true
                     item.messagesAdded.forEach { added ->
                         val m = added.message
                         if (m?.threadId != null) touchedThreadIds.add(m.threadId!!)
@@ -181,6 +186,15 @@ class MailRepository(
                     item.messagesDeleted.forEach { removed -> removed.message?.id?.let(deletedMessageIds::add) }
                 }
                 pageToken = page.nextPageToken
+                val overBudget =
+                    touchedThreadIds.size + messageIdsNeedingLookup.size > MAX_THREADS_PER_DELTA
+                if (overBudget && pageToken != null) {
+                    // More work than one pass can hydrate. Stop paging without advancing the
+                    // checkpoint past this page; the next sync resumes right here.
+                    break
+                }
+                // Page fully processed → its last history id becomes the checkpoint.
+                page.history.lastOrNull()?.let { lastProcessedId = it.id }
             } while (pageToken != null)
         } catch (e: HttpException) {
             if (e.code() == 404) {
@@ -208,12 +222,10 @@ class MailRepository(
         val capped = touchedThreadIds.take(MAX_THREADS_PER_DELTA)
         hydrateThreads(capped)
 
-        if (touchedThreadIds.size > MAX_THREADS_PER_DELTA) {
-            // Rewind one step so the next sync re-processes the remainder.
-            accountDao.updateSyncPoint(accountEmail, newestHistoryId - 1, System.currentTimeMillis())
-        } else {
-            accountDao.updateSyncPoint(accountEmail, newestHistoryId.coerceAtLeast(fallbackEnd), System.currentTimeMillis())
-        }
+        // Persist the last fully processed history id string as-is. With an empty window,
+        // fall back to the profile's current id so the checkpoint still advances.
+        val checkpoint = if (sawAnyItem) lastProcessedId else fallbackEnd ?: startHistoryId
+        accountDao.updateSyncPoint(accountEmail, checkpoint, System.currentTimeMillis())
     }
 
     /** One threads.get per id → aggregate row + per-message rows. */
@@ -252,7 +264,12 @@ class MailRepository(
     }
 
     private suspend fun hydrateFromQuery(labelIds: List<String>) {
-        val page = api.listThreads(labelIds = labelIds, maxResults = 30)
+        // Gmail excludes TRASH/SPAM unless includeSpamTrash is set — required to hydrate those folders.
+        val page = api.listThreads(
+            labelIds = labelIds,
+            maxResults = 30,
+            includeSpamTrash = labelIds.any { it == "TRASH" || it == "SPAM" },
+        )
         hydrateThreads(page.threads.map { it.id })
     }
 
@@ -448,6 +465,9 @@ class MailRepository(
         outboxDao.delete(outboxId)
     }
 
+    /** Count of sends stuck in FAILED state — surfaced for the mailbox failed-send banner. */
+    fun observeFailedSends(): Flow<Int> = outboxDao.observeFailedCount(accountEmail)
+
     suspend fun archiveAfterSend(threadId: String?) {
         threadId ?: return
         runCatching { archive(listOf(threadId)) }
@@ -457,7 +477,12 @@ class MailRepository(
 
     /** Server-side search with full Gmail operator syntax (from:, after:, has:attachment …). */
     suspend fun searchServer(query: String): List<ThreadEntity> = withContext(Dispatchers.IO) {
-        val page = api.listThreads(q = query, maxResults = 25)
+        val lowered = query.lowercase()
+        val page = api.listThreads(
+            q = query,
+            maxResults = 25,
+            includeSpamTrash = "in:trash" in lowered || "in:spam" in lowered,
+        )
         hydrateThreads(page.threads.map { it.id })
         page.threads.mapNotNull { threadDao.get(accountEmail, it.id) }
     }

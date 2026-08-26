@@ -13,7 +13,7 @@ interface AccountDao {
     @Query("SELECT * FROM accounts WHERE email = :email")
     suspend fun get(email: String): AccountEntity?
     @Query("UPDATE accounts SET historyId = :historyId, lastSyncAt = :syncedAt WHERE email = :email")
-    suspend fun updateSyncPoint(email: String, historyId: Long?, syncedAt: Long)
+    suspend fun updateSyncPoint(email: String, historyId: String?, syncedAt: Long)
     @Query("DELETE FROM accounts WHERE email = :email")
     suspend fun delete(email: String)
 }
@@ -131,6 +131,8 @@ interface OutboxDao {
     suspend fun get(id: Long): OutboxEntity?
     @Query("SELECT * FROM outbox WHERE state = 'QUEUED' ORDER BY targetAt ASC")
     fun observeQueued(): Flow<List<OutboxEntity>>
+    @Query("SELECT COUNT(*) FROM outbox WHERE accountEmail = :account AND state = 'FAILED'")
+    fun observeFailedCount(account: String): Flow<Int>
     @Query("UPDATE outbox SET state = :state, error = :error WHERE id = :id")
     suspend fun setState(id: Long, state: String, error: String? = null)
     @Query("UPDATE outbox SET attempts = attempts + 1 WHERE id = :id")
