@@ -46,6 +46,13 @@ Package: `dev.xxemail`. License target: GPL-3.0-or-later. minSdk 26 / target 35.
       neither persists nor recaches over fresh tokens (regression test added);
       MainActivity validates redirect OAuth `state` against the outstanding request —
       forged AppAuth-shaped intents are logged and dropped.
+- [x] Phase G androidTest surface added: `MigrationTest`
+      (v1→2 and v1→3 via `MigrationTestHelper`; asserts historyId INTEGER→TEXT,
+      queued-send rfc822Base64 survival, snoozedUntil survival, snooze_wakes +
+      folder_pages + messages.attachmentsJson) and `TokenStoreTest` (round-trip,
+      remove isolation, failed-persist durability with read-only dir). Schemas wired
+      into androidTest assets; runner + room-testing/test deps in catalog.
+      `compileDebugAndroidTestKotlin` + `testDebugUnitTest` PASS. Device run pending.
 
 ## Known gaps / next work
 

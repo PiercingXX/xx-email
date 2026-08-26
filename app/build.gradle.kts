@@ -20,6 +20,7 @@ android {
         // RedirectUriReceiverActivity's VIEW filter; must match the scheme in
         // OAuthConfig.REDIRECT_URI / docs/oauth-setup.md ("dev.xxemail:/oauth2redirect").
         manifestPlaceholders["appAuthRedirectScheme"] = "dev.xxemail"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -48,6 +49,14 @@ android {
         }
     }
     testOptions { unitTests.isIncludeAndroidResources = false }
+
+    // MigrationTestHelper loads exported schemas from androidTest assets under
+    // <database-class-canonical-name>/<version>.json.
+    sourceSets {
+        getByName("androidTest") {
+            assets.srcDir("$projectDir/schemas")
+        }
+    }
 }
 
 // Room schema exports (committed under app/schemas/) power migration review in diffs.
@@ -84,4 +93,8 @@ dependencies {
     implementation(libs.angus.mail)
 
     testImplementation(libs.junit)
+
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.room.testing)
 }
