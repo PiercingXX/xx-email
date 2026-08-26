@@ -4,6 +4,9 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -11,6 +14,7 @@ import net.openid.appauth.AuthState
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -30,9 +34,15 @@ class TokenStore(private val filesDir: File) {
     private val mutex = Mutex()
     private var cache: MutableMap<String, String>? = null
 
-    suspend fun save(email: String, state: AuthState): Unit = locked {
+    /** True when authstates.bin exists but could not be read/decrypted. */
+    private val _unreadable = MutableStateFlow(false)
+    val unreadable: StateFlow<Boolean> = _unreadable.asStateFlow()
+
+    suspend fun save(email: String, state: AuthState): Unit = saveSerialized(email, state.jsonSerializeString())
+
+    suspend fun saveSerialized(email: String, json: String): Unit = locked {
         val map = loadMap().toMutableMap()
-        map[email] = state.jsonSerializeString()
+        map[email] = json
         persist(map)
     }
 
@@ -70,27 +80,39 @@ class TokenStore(private val filesDir: File) {
                     out[email] = String(decrypt(blob), Charsets.UTF_8)
                 }
                 out
-            }.also { cache = it.toMutableMap() }
+            }.also {
+                cache = it.toMutableMap()
+                _unreadable.value = false
+            }
         } catch (t: Throwable) {
-            Log.w(TAG, "Token store unreadable; starting clean", t)
+            // The file exists but cannot be read/decrypted (e.g. keystore key lost).
+            // Never pretend the store is empty: flag it so the UI can ask for re-auth
+            // instead of silently leaving a zombie account behind.
+            Log.w(TAG, "Token store unreadable; treating as empty and flagging", t)
+            _unreadable.value = true
             mutableMapOf<String, String>().also { cache = it }
         }
     }
 
     private fun persist(map: Map<String, String>) {
         val tmp = File(file.parentFile, file.name + ".tmp")
-        DataOutputStream(tmp.outputStream().buffered()).use { output ->
-            output.writeInt(map.size)
-            map.forEach { (email, json) ->
-                val blob = encrypt(json.toByteArray(Charsets.UTF_8))
-                output.writeUTF(email)
-                output.writeInt(blob.size)
-                output.write(blob)
+        FileOutputStream(tmp).use { raw ->
+            DataOutputStream(raw.buffered()).use { output ->
+                output.writeInt(map.size)
+                map.forEach { (email, json) ->
+                    val blob = encrypt(json.toByteArray(Charsets.UTF_8))
+                    output.writeUTF(email)
+                    output.writeInt(blob.size)
+                    output.write(blob)
+                }
+                output.flush()
             }
+            raw.fd.sync() // fsync before rename so a crash can't leave an empty/truncated store
         }
         if (!tmp.renameTo(file)) {
-            file.delete()
-            check(tmp.renameTo(file)) { "Could not persist token store" }
+            // Do NOT delete the original file on failed rename — old credentials stay intact.
+            tmp.delete()
+            throw IllegalStateException("Could not persist token store atomically; previous file left untouched")
         }
         cache = map.toMutableMap()
     }

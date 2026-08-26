@@ -5,6 +5,7 @@ import android.content.Intent
 import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import net.openid.appauth.AuthorizationException
@@ -30,6 +31,20 @@ class AuthRepository(
     private val settings: dev.xxemail.data.repo.SettingsRepository,
 ) {
 
+    /**
+     * Shared service for token refreshes (interceptor bursts reuse one instance instead of
+     * constructing+disposing per request). Tied to the app context; lives for app lifetime.
+     */
+    private val refreshService: AuthorizationService by lazy { AuthorizationService(context.applicationContext) }
+
+    private val tokenCache = TokenCache(
+        loadSession = { email -> tokens.load(email)?.let { AuthStateSession(it, ::refreshService) } },
+        persist = { email, snapshot -> tokens.saveSerialized(email, snapshot) },
+    )
+
+    /** Accounts whose refresh failed permanently and need an interactive sign-in. */
+    val reauthNeeded: StateFlow<Set<String>> get() = tokenCache.reauthNeeded
+
     /** Build the browser intent for the consent screen. Requires a configured client ID. */
     suspend fun buildAuthIntent(): Intent {
         val clientId = settings.clientId()
@@ -43,7 +58,11 @@ class AuthRepository(
             .setScope(OAuthConfig.SCOPES)
             .setCodeVerifier(CodeVerifierUtil.generateRandomCodeVerifier())
             .build()
-        return AuthorizationService(context).getAuthorizationRequestIntent(request)
+        // getAuthorizationRequestIntent needs no binding; dispose immediately (no leak).
+        val service = AuthorizationService(context)
+        val intent = service.getAuthorizationRequestIntent(request)
+        service.dispose()
+        return intent
     }
 
     /**
@@ -81,27 +100,20 @@ class AuthRepository(
         val email = extractEmail(state)
             ?: throw IllegalStateException("Google did not return an email claim")
         tokens.save(email, state)
+        // Evict any cached session/flag so the next use loads the fresh tokens.
+        tokenCache.clear(email)
         Log.i(TAG, "Authorized account stored")
         return email
     }
 
     /** Run [block] with a fresh access token, transparently refreshing if needed. */
-    suspend fun <T> withAccessToken(email: String, block: (String) -> T): T {
-        val state = tokens.load(email) ?: error("Account not authorized: $email")
-        return suspendCancellableCoroutine { cont ->
-            val service = AuthorizationService(context)
-            state.performActionWithFreshTokens(service) { accessToken: String?, _: String?, ex: AuthorizationException? ->
-                service.dispose()
-                when {
-                    ex != null -> cont.resumeWithException(IllegalStateException("Token refresh failed (${ex.error}); re-add the account.", ex))
-                    accessToken == null -> cont.resumeWithException(IllegalStateException("No access token"))
-                    else -> cont.resume(block(accessToken))
-                }
-            }
-        }
-    }
+    suspend fun <T> withAccessToken(email: String, block: (String) -> T): T =
+        tokenCache.withAccessToken(email, block)
 
-    suspend fun signOut(email: String) = tokens.remove(email)
+    suspend fun signOut(email: String) {
+        tokenCache.clear(email)
+        tokens.remove(email)
+    }
 
     private suspend fun extractEmail(state: AuthState): String? = withContext(Dispatchers.Default) {
         val idToken = state.idToken ?: return@withContext null
@@ -111,5 +123,32 @@ class AuthRepository(
         }.getOrNull()
     }
 
-    companion object { private const val TAG = "AuthRepository" }
+    /** [TokenSession] backed by AppAuth's AuthState and the shared refresh service. */
+    private class AuthStateSession(
+        private val state: AuthState,
+        private val service: () -> AuthorizationService,
+    ) : TokenSession {
+        override fun serializedSnapshot(): String = state.jsonSerializeString()
+
+        override fun acquire(onDone: (TokenAcquisition) -> Unit) {
+            state.performActionWithFreshTokens(service()) { accessToken: String?, _: String?, ex: AuthorizationException? ->
+                onDone(acquisitionFrom(ex, accessToken))
+            }
+        }
+
+        private fun acquisitionFrom(exception: AuthorizationException?, accessToken: String?): TokenAcquisition = when {
+            exception != null && isPermanentAuthError(exception) -> TokenAcquisition.ReauthNeeded(exception.error)
+            exception != null -> TokenAcquisition.Failed("Token refresh failed (${exception.error})")
+            accessToken != null -> TokenAcquisition.Success(accessToken)
+            else -> TokenAcquisition.Failed("No access token")
+        }
+
+        private fun isPermanentAuthError(ex: AuthorizationException): Boolean =
+            ex.error == INVALID_GRANT || ex.type == AuthorizationException.TYPE_OAUTH_TOKEN_ERROR
+    }
+
+    companion object {
+        private const val TAG = "AuthRepository"
+        private const val INVALID_GRANT = "invalid_grant"
+    }
 }

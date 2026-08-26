@@ -32,14 +32,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- AppAuth OAuth redirect capture: dev.xxemail:/oauth2redirect -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="dev.xxemail" android:host="oauth2redirect" />
-            </intent-filter>
         </activity>
+
+        <!-- OAuth redirect capture: AppAuth's library manifest merges
+             net.openid.appauth.RedirectUriReceiverActivity with a VIEW filter for the
+             ${appAuthRedirectScheme} placeholder ("dev.xxemail", see app/build.gradle.kts).
+             Do NOT add that filter here; RedirectUriReceiverActivity must own the redirect. -->
 
         <provider
             android:name="androidx.core.content.FileProvider"

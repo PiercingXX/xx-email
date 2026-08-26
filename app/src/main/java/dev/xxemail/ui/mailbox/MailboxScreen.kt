@@ -44,6 +44,7 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -86,6 +87,7 @@ fun MailboxScreen(
     onSettings: () -> Unit,
     onSwitchAccount: (String) -> Unit,
     onAddAccount: () -> Unit,
+    onSignInAgain: () -> Unit,
 ) {
     val vm = rememberMailboxViewModel(account)
     val graph = LocalContext.current.appGraph
@@ -95,6 +97,8 @@ fun MailboxScreen(
     var sheetOpen by remember { mutableStateOf(false) }
     var snoozeTarget by remember { mutableStateOf<String?>(null) }
     var labelSheetOpen by remember { mutableStateOf(false) }
+    val needsReauth by vm.needsReauth.collectAsStateWithLifecycle(false)
+    val storeUnreadable by vm.storeUnreadable.collectAsStateWithLifecycle(false)
 
     val accounts by graph.accounts.observeAccounts().collectAsStateWithLifecycle(initialValue = emptyList())
     val swipeLeft by graph.settings.swipeLeftFlow.collectAsStateWithLifecycle(SwipeAction.ARCHIVE)
@@ -154,6 +158,16 @@ fun MailboxScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+            if (needsReauth || storeUnreadable) {
+                ReauthBanner(
+                    message = if (storeUnreadable) {
+                        "Stored credentials are unreadable — sign in again."
+                    } else {
+                        "Google session expired for $account — sign in again."
+                    },
+                    onSignInAgain = onSignInAgain,
+                )
+            }
             val currentFolder = vm.folder
             if (currentFolder == null) {
                 ScrollableTabRow(selectedTabIndex = pagerState.currentPage) {
@@ -198,6 +212,21 @@ fun MailboxScreen(
             onApply = { labelId, add -> vm.applyLabel(labelId, add, vm.selection.toList()); labelSheetOpen = false },
             onDismiss = { labelSheetOpen = false },
         )
+    }
+}
+
+@Composable
+private fun ReauthBanner(message: String, onSignInAgain: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.errorContainer, tonalElevation = 2.dp) {
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Text(
+                message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onSignInAgain) { Text("Sign in again") }
+        }
     }
 }
 

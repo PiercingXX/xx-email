@@ -14,16 +14,21 @@ import dev.xxemail.ui.nav.LocalAuthLauncher
 import dev.xxemail.ui.nav.XxNavHost
 import dev.xxemail.ui.theme.XxTheme
 import kotlinx.coroutines.launch
+import net.openid.appauth.AuthorizationException
+import net.openid.appauth.AuthorizationResponse
 
 /**
- * Single-activity app. Also the OAuth redirect target (see manifest intent-filter):
- * both onActivityResult and onNewIntent are routed into one callback because browsers
- * may deliver the redirect either way depending on launch flags.
+ * Single-activity app. OAuth redirects land in AppAuth's RedirectUriReceiverActivity
+ * (declared by the library manifest) and are forwarded here either as an activity
+ * result or via onNewIntent; both paths funnel into one callback.
  */
 class MainActivity : ComponentActivity() {
 
     private var authCallback: ((Intent?) -> Unit)? = null
     private var authDelivered = false
+
+    /** A redirect that arrived before [launchOAuthFlow] registered [authCallback]. */
+    private var pendingRedirect: Intent? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,13 +62,22 @@ class MainActivity : ComponentActivity() {
                 onResult(runCatching { (application as XxEmailApp).graph.auth.onAuthorizationResult(data) })
             }
         }
-        lifecycleScope.launch {
-            try {
-                @Suppress("DEPRECATION")
-                startActivityForResult((application as XxEmailApp).graph.auth.buildAuthIntent(), REQ_AUTH)
-            } catch (t: Throwable) {
-                authCallback = null
-                onResult(Result.failure(t))
+        // A redirect can arrive (via onNewIntent) before a callback was registered, e.g.
+        // while the activity was being recreated mid-sign-in. Deliver it now instead of
+        // opening the browser again.
+        pendingRedirect?.let { pending ->
+            pendingRedirect = null
+            deliverRedirect(pending)
+        }
+        if (!authDelivered) {
+            lifecycleScope.launch {
+                try {
+                    @Suppress("DEPRECATION")
+                    startActivityForResult((application as XxEmailApp).graph.auth.buildAuthIntent(), REQ_AUTH)
+                } catch (t: Throwable) {
+                    authCallback = null
+                    onResult(Result.failure(t))
+                }
             }
         }
     }
@@ -80,14 +94,25 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun maybeConsumeRedirect(intent: Intent?) {
-        if (authDelivered) return
-        if (intent?.data?.scheme == "dev.xxemail") {
-            authDelivered = true
-            val callback = authCallback
-            authCallback = null
-            callback?.invoke(intent)
+        if (intent == null || !isAppAuthResult(intent)) return
+        if (authCallback == null) {
+            // Queue until launchOAuthFlow wires the callback; never drop or misroute.
+            pendingRedirect = intent
+            return
         }
+        deliverRedirect(intent)
     }
+
+    private fun deliverRedirect(intent: Intent) {
+        authDelivered = true
+        val callback = authCallback
+        authCallback = null
+        callback?.invoke(intent)
+    }
+
+    /** Only AppAuth result intents qualify; raw VIEW uris are never treated as results. */
+    private fun isAppAuthResult(intent: Intent): Boolean =
+        AuthorizationResponse.fromIntent(intent) != null || AuthorizationException.fromIntent(intent) != null
 
     companion object { private const val REQ_AUTH = 4242 }
 }

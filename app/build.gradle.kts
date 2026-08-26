@@ -16,7 +16,9 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
-        // AppAuth's merged manifest requires this placeholder; matches our intent-filter scheme.
+        // AppAuth's library manifest injects ${appAuthRedirectScheme} into
+        // RedirectUriReceiverActivity's VIEW filter; must match the scheme in
+        // OAuthConfig.REDIRECT_URI / docs/oauth-setup.md ("dev.xxemail:/oauth2redirect").
         manifestPlaceholders["appAuthRedirectScheme"] = "dev.xxemail"
         vectorDrawables { useSupportLibrary = true }
     }

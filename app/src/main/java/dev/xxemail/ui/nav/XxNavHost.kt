@@ -51,6 +51,7 @@ fun XxNavHost() {
                     }
                 },
                 onAddAccount = { navController.navigate(Routes.SETUP) },
+                onSignInAgain = { navController.navigate(Routes.SETUP) },
             )
         }
         composable(Routes.THREAD, arguments = Routes.threadArgs) { entry ->
