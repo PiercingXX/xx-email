@@ -1,7 +1,11 @@
 package dev.xxemail.ui.nav
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
@@ -16,15 +20,32 @@ import dev.xxemail.ui.setup.SetupScreen
 import dev.xxemail.ui.thread.ThreadScreen
 
 @Composable
-fun XxNavHost() {
+fun XxNavHost(notificationAccount: String? = null, notificationThreadId: String? = null) {
     val navController = rememberNavController()
     val graph = LocalContext.current.appGraph
     val accounts by graph.accounts.observeAccounts().collectAsStateWithLifecycle(initialValue = null)
 
+    // Notification taps land on the target account's mailbox (never a bare start screen);
+    // the exact thread is pushed on top once the mailbox back stack exists.
+    val notificationTargetAccount = notificationAccount
+        ?.takeIf { target -> accounts?.any { it.email == target } == true }
     val startDestination = when {
         accounts == null -> Routes.SETUP // not loaded yet; SetupScreen self-corrects
         accounts!!.isEmpty() -> Routes.SETUP
+        notificationTargetAccount != null -> Routes.mailbox(notificationTargetAccount)
         else -> Routes.mailbox(accounts!!.first().email)
+    }
+
+    var pendingThreadNavigated by remember { mutableStateOf(false) }
+    LaunchedEffect(accounts) {
+        if (pendingThreadNavigated) return@LaunchedEffect
+        val account = notificationTargetAccount ?: return@LaunchedEffect
+        val threadId = notificationThreadId ?: return@LaunchedEffect
+        val current = navController.currentBackStackEntry
+        if (current?.destination?.route == Routes.MAILBOX && current.arguments?.getString("account") == account) {
+            pendingThreadNavigated = true
+            navController.navigate(Routes.thread(account, threadId))
+        }
     }
 
     NavHost(navController = navController, startDestination = startDestination) {

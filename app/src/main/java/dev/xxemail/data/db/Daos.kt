@@ -38,14 +38,14 @@ interface ThreadDao {
     @Query(
         """SELECT * FROM threads
            WHERE accountEmail = :account AND inInbox = 1 AND snoozedUntil IS NULL
-             AND ((:includeEmpty = 1 AND categories = '') OR (:category <> '' AND categories LIKE '%' || :category || '%'))
-           ORDER BY date DESC""",
+             AND ((:includeEmpty = 1 AND categories = '') OR (:category <> '' AND (',' || categories || ',') LIKE '%,' || :category || ',%'))
+           ORDER BY date DESC LIMIT 200""",
     )
     fun observeInboxCategory(account: String, category: String, includeEmpty: Boolean): Flow<List<ThreadEntity>>
 
     @Query(
         """SELECT * FROM threads
-           WHERE accountEmail = :account AND starred = 1 AND labelsCsv NOT LIKE '%TRASH%'
+           WHERE accountEmail = :account AND starred = 1 AND (',' || labelsCsv || ',') NOT LIKE '%,TRASH,%'
            ORDER BY date DESC""",
     )
     fun observeStarred(account: String): Flow<List<ThreadEntity>>
@@ -58,7 +58,7 @@ interface ThreadDao {
 
     @Query(
         """SELECT * FROM threads
-           WHERE accountEmail = :account AND labelsCsv LIKE '%' || :labelId || '%'
+           WHERE accountEmail = :account AND (',' || labelsCsv || ',') LIKE '%,' || :labelId || ',%'
            ORDER BY date DESC LIMIT 500""",
     )
     fun observeWithLabel(account: String, labelId: String): Flow<List<ThreadEntity>>
@@ -69,26 +69,34 @@ interface ThreadDao {
     @Query("SELECT COUNT(*) FROM threads WHERE accountEmail = :account")
     suspend fun count(account: String): Int
 
+    @Query(
+        """SELECT COUNT(*) FROM threads
+           WHERE accountEmail = :account AND inInbox = 1 AND snoozedUntil IS NULL
+             AND ((:includeEmpty = 1 AND categories = '') OR (:category <> '' AND (',' || categories || ',') LIKE '%,' || :category || ',%'))""",
+    )
+    suspend fun countInboxCategory(account: String, category: String, includeEmpty: Boolean): Int
+
     @Query("SELECT * FROM threads WHERE accountEmail = :account AND inInbox = 1 AND snoozedUntil IS NULL ORDER BY date DESC")
     suspend fun inboxAll(account: String): List<ThreadEntity>
 
-    @Query("SELECT COUNT(*) FROM threads WHERE accountEmail = :account AND labelsCsv LIKE '%' || :labelId || '%'")
+    @Query(
+        "SELECT COUNT(*) FROM threads WHERE accountEmail = :account AND (',' || labelsCsv || ',') LIKE '%,' || :labelId || ',%'",
+    )
     suspend fun countWithLabel(account: String, labelId: String): Int
 
-    @Query("SELECT * FROM threads WHERE accountEmail = :account AND labelsCsv LIKE '%' || :labelId || '%' ORDER BY date DESC LIMIT 200")
+    @Query(
+        """SELECT * FROM threads
+           WHERE accountEmail = :account AND (',' || labelsCsv || ',') LIKE '%,' || :labelId || ',%'
+           ORDER BY date DESC LIMIT 200""",
+    )
     suspend fun withLabelList(account: String, labelId: String): List<ThreadEntity>
 
     @Query("UPDATE threads SET snoozedUntil = :wakeAt WHERE accountEmail = :account AND id = :id")
     suspend fun setSnoozed(account: String, id: String, wakeAt: Long?)
 
-    @Query("UPDATE threads SET inInbox = :inInbox WHERE accountEmail = :account AND id = :id")
-    suspend fun setInInbox(account: String, id: String, inInbox: Boolean)
-
-    @Query("UPDATE threads SET starred = :starred WHERE accountEmail = :account AND id = :id")
-    suspend fun setStarred(account: String, id: String, starred: Boolean)
-
-    @Query("UPDATE threads SET unreadCount = CASE WHEN :read THEN 0 ELSE MAX(unreadCount, 1) END WHERE accountEmail = :account AND id = :id")
-    suspend fun applyRead(account: String, id: String, read: Boolean)
+    /** Combined local-first move: Inbox membership + wrapped label set stay consistent. */
+    @Query("UPDATE threads SET inInbox = :inInbox, labelsCsv = :labelsCsv WHERE accountEmail = :account AND id = :id")
+    suspend fun setInboxAndLabels(account: String, id: String, inInbox: Boolean, labelsCsv: String)
 
     @Query("DELETE FROM threads WHERE accountEmail = :account")
     suspend fun deleteForAccount(account: String)
@@ -110,8 +118,8 @@ interface MessageDao {
     suspend fun deleteById(account: String, id: String)
     @Query("SELECT * FROM messages WHERE accountEmail = :account AND id = :id")
     suspend fun get(account: String, id: String): MessageEntity?
-    @Query("UPDATE messages SET bodyHtml = :html, bodyPlain = :plain, bodyFetched = 1 WHERE accountEmail = :account AND id = :id")
-    suspend fun updateBodies(account: String, id: String, html: String?, plain: String?)
+    @Query("UPDATE messages SET bodyHtml = :html, bodyPlain = :plain, bodyFetched = 1, attachmentsJson = :attachmentsJson WHERE accountEmail = :account AND id = :id")
+    suspend fun updateBodies(account: String, id: String, html: String?, plain: String?, attachmentsJson: String?)
     @Query("DELETE FROM messages WHERE accountEmail = :account AND threadId IN (:threadIds)")
     suspend fun deleteByThreadIds(account: String, threadIds: List<String>)
     @Query("DELETE FROM messages WHERE accountEmail = :account")
@@ -155,8 +163,16 @@ interface OutboxDao {
 }
 
 @Dao
-interface SnoozeWakeDao {
-    @Upsert suspend fun upsert(wake: SnoozeWakeEntity)
+interface FolderPageDao {
+    @Upsert suspend fun upsert(page: FolderPageEntity)
+    @Query("SELECT * FROM folder_pages WHERE accountEmail = :account AND folderKey = :key")
+    suspend fun get(account: String, key: String): FolderPageEntity?
+    @Query("DELETE FROM folder_pages WHERE accountEmail = :account")
+    suspend fun deleteForAccount(account: String)
+}
+
+@Dao
+interface SnoozeWakeDao {    @Upsert suspend fun upsert(wake: SnoozeWakeEntity)
     @Query("SELECT * FROM snooze_wakes WHERE accountEmail = :account AND threadId = :threadId")
     suspend fun get(account: String, threadId: String): SnoozeWakeEntity?
     @Query("SELECT * FROM snooze_wakes WHERE targetAt <= :now ORDER BY targetAt ASC")

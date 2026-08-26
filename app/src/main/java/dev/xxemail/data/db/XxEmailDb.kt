@@ -16,8 +16,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageFtsEntity::class,
         OutboxEntity::class,
         SnoozeWakeEntity::class,
+        FolderPageEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class XxEmailDb : RoomDatabase() {
@@ -27,8 +28,26 @@ abstract class XxEmailDb : RoomDatabase() {
     abstract fun messageDao(): MessageDao
     abstract fun outboxDao(): OutboxDao
     abstract fun snoozeWakeDao(): SnoozeWakeDao
+    abstract fun folderPageDao(): FolderPageDao
 
     companion object {
+
+        /**
+         * v2 → v3 (never destructive):
+         *  - messages gains a nullable JSON column persisting attachment metadata so cached
+         *    thread opens still show attachment chips without re-fetching bodies.
+         *  - new `folder_pages` table stores per-folder pagination cursors ("load more").
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `attachmentsJson` TEXT")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `folder_pages` (" +
+                        "`accountEmail` TEXT NOT NULL, `folderKey` TEXT NOT NULL, " +
+                        "`nextPageToken` TEXT, PRIMARY KEY(`accountEmail`, `folderKey`))",
+                )
+            }
+        }
 
         /**
          * v1 → v2 (never destructive — queued sends and snoozes must survive):
@@ -72,7 +91,7 @@ abstract class XxEmailDb : RoomDatabase() {
          */
         fun build(context: Context): XxEmailDb =
             Room.databaseBuilder(context, XxEmailDb::class.java, "xxemail.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
     }
 }

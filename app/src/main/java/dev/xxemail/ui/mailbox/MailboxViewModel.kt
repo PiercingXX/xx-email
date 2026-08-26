@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
@@ -63,6 +64,11 @@ class MailboxViewModel(
 
     private val folderFlows = HashMap<MailboxFolder, StateFlow<List<ThreadEntity>>>()
 
+    /** Per-folder "more pages on the server" flag; drives the Load More row. */
+    val canLoadMore = mutableStateMapOf<MailboxFolder, Boolean>()
+    var loadingMore by mutableStateOf(false)
+        private set
+
     init {
         refresh()
         viewModelScope.launch {
@@ -75,6 +81,21 @@ class MailboxViewModel(
             repo.observeFolder(folder)
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
         }
+
+    fun refreshCanLoadMore(folder: MailboxFolder) {
+        viewModelScope.launch {
+            canLoadMore[folder] = runCatching { repo.hasMorePages(folder) }.getOrDefault(false)
+        }
+    }
+
+    fun loadMore(folder: MailboxFolder) {
+        if (loadingMore) return
+        viewModelScope.launch {
+            loadingMore = true
+            canLoadMore[folder] = runCatching { repo.loadMore(folder) }.getOrDefault(false)
+            loadingMore = false
+        }
+    }
 
     fun selectFolder(folder: MailboxFolder?) {
         this.folder = folder

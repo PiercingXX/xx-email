@@ -70,6 +70,8 @@ data class MessageEntity(
     val bodyHtml: String? = null,
     val bodyPlain: String? = null,
     val bodyFetched: Boolean = false,
+    /** JSON array of persisted attachment metadata — cached opens still show chips. */
+    val attachmentsJson: String? = null,
 )
 
 /** Offline full-text index over cached messages. */
@@ -130,4 +132,16 @@ data class SnoozeWakeEntity(
     /** Epoch ms at which INBOX should be restored. */
     val targetAt: Long,
     val createdAt: Long = System.currentTimeMillis(),
+)
+
+/**
+ * Server pagination cursor per folder ("load more" instead of a hard page stop).
+ * A row with a non-null [nextPageToken] means more pages are known to exist;
+ * a row with a null token marks the folder fully paged.
+ */
+@Entity(tableName = "folder_pages", primaryKeys = ["accountEmail", "folderKey"])
+data class FolderPageEntity(
+    val accountEmail: String,
+    val folderKey: String,
+    val nextPageToken: String? = null,
 )

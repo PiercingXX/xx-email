@@ -48,6 +48,9 @@ object SyncScheduler {
 
     const val UNIQUE_PERIODIC = "sync-periodic"
 
+    /** Unique name for one-shot syncs (manual kicks and delta-overflow follow-ups). */
+    const val UNIQUE_ONESHOT = "sync-now"
+
     /** (Re)registers the periodic poll. WorkManager floor is 15 minutes. */
     fun ensurePeriodic(workManager: WorkManager, intervalMinutes: Int) {
         val request = PeriodicWorkRequestBuilder<SyncWorker>(intervalMinutes.coerceAtLeast(15).toLong(), TimeUnit.MINUTES)
@@ -62,7 +65,7 @@ object SyncScheduler {
 
     fun kickImmediate(graph: AppGraph, forceFull: Boolean = false) {
         graph.workManager.enqueueUniqueWork(
-            "sync-now",
+            UNIQUE_ONESHOT,
             ExistingWorkPolicy.REPLACE,
             OneTimeWorkRequestBuilder<SyncWorker>()
                 .setInputData(androidx.work.workDataOf(SyncWorker.KEY_FORCE_FULL to forceFull))

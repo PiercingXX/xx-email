@@ -241,6 +241,7 @@ private fun ColumnScope.ThreadListPage(
     onSnooze: (String) -> Unit,
 ) {
     val threads by vm.flowFor(folder).collectAsStateWithLifecycle(emptyList())
+    LaunchedEffect(folder) { vm.refreshCanLoadMore(folder) }
     if (threads.isEmpty()) {
         EmptyState("Nothing here")
     } else {
@@ -265,6 +266,17 @@ private fun ColumnScope.ThreadListPage(
                     } else null,
                 )
                 HorizontalDivider()
+            }
+            if (vm.canLoadMore[folder] == true) {
+                item {
+                    TextButton(
+                        onClick = { vm.loadMore(folder) },
+                        enabled = !vm.loadingMore,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    ) {
+                        Text(if (vm.loadingMore) "Loading…" else "Load more")
+                    }
+                }
             }
         }
     }

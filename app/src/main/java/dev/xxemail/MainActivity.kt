@@ -34,6 +34,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val graph = (application as XxEmailApp).graph
 
+        // New-mail notification taps carry the target account/thread (see Notifier).
+        val notificationAccount = intent?.getStringExtra(EXTRA_ACCOUNT)
+        val notificationThreadId = intent?.getStringExtra(EXTRA_THREAD_ID)
+
         setContent {
             val themeMode by graph.settings.themeFlow.collectAsStateWithLifecycle(ThemeMode.SYSTEM)
             val dynamicColors by graph.settings.dynamicColorsFlow.collectAsStateWithLifecycle(true)
@@ -46,7 +50,10 @@ class MainActivity : ComponentActivity() {
                 dynamicColor = dynamicColors,
             ) {
                 CompositionLocalProvider(LocalAuthLauncher provides ::launchOAuthFlow) {
-                    XxNavHost()
+                    XxNavHost(
+                        notificationAccount = notificationAccount,
+                        notificationThreadId = notificationThreadId,
+                    )
                 }
             }
         }
@@ -114,5 +121,9 @@ class MainActivity : ComponentActivity() {
     private fun isAppAuthResult(intent: Intent): Boolean =
         AuthorizationResponse.fromIntent(intent) != null || AuthorizationException.fromIntent(intent) != null
 
-    companion object { private const val REQ_AUTH = 4242 }
+    companion object {
+        private const val REQ_AUTH = 4242
+        const val EXTRA_ACCOUNT = "dev.xxemail.extra.ACCOUNT"
+        const val EXTRA_THREAD_ID = "dev.xxemail.extra.THREAD_ID"
+    }
 }

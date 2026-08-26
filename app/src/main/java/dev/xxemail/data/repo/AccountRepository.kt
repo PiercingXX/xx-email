@@ -6,6 +6,7 @@ import dev.xxemail.data.api.ModifyLabelsRequest
 import dev.xxemail.data.auth.TokenStore
 import dev.xxemail.data.db.AccountDao
 import dev.xxemail.data.db.AccountEntity
+import dev.xxemail.data.db.FolderPageDao
 import dev.xxemail.data.db.LabelDao
 import dev.xxemail.data.db.MessageDao
 import dev.xxemail.data.db.OutboxDao
@@ -24,6 +25,7 @@ class AccountRepository(
     private val labelDao: LabelDao,
     private val outboxDao: OutboxDao,
     private val wakeDao: SnoozeWakeDao,
+    private val folderPageDao: FolderPageDao,
     private val tokens: TokenStore,
     /** Live-API accessor; used for best-effort restores while tokens still exist. */
     private val apiProvider: (String) -> GmailApi,
@@ -76,6 +78,7 @@ class AccountRepository(
         messageDao.deleteForAccount(email)
         threadDao.deleteForAccount(email)
         labelDao.deleteForAccount(email)
+        folderPageDao.deleteForAccount(email)
         accountDao.delete(email)
         return RemoveResult(restored, warnings)
     }

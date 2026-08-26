@@ -10,12 +10,16 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import dev.xxemail.data.api.GmailApi
+import dev.xxemail.data.api.HistoryItem
 import dev.xxemail.data.api.Message
+import dev.xxemail.data.api.MessageParts
 import dev.xxemail.data.api.MimeComposer
 import dev.xxemail.data.api.ModifyLabelsRequest
-import dev.xxemail.data.api.Thread
+import dev.xxemail.data.api.ThreadAggregation
 import dev.xxemail.data.db.AccountDao
 import dev.xxemail.data.db.AccountEntity
+import dev.xxemail.data.db.FolderPageDao
+import dev.xxemail.data.db.FolderPageEntity
 import dev.xxemail.data.db.LabelDao
 import dev.xxemail.data.db.LabelEntity
 import dev.xxemail.data.db.MessageDao
@@ -29,14 +33,21 @@ import dev.xxemail.data.db.SnoozeWakeEntity
 import dev.xxemail.data.db.ThreadDao
 import dev.xxemail.data.db.ThreadEntity
 import dev.xxemail.domain.AddressUtils
+import dev.xxemail.domain.LabelCsv
 import dev.xxemail.domain.MailboxFolder
 import dev.xxemail.domain.SafePaths
+import dev.xxemail.sync.NewMailDetector
 import dev.xxemail.sync.OutboxFiles
 import dev.xxemail.sync.OutboxWorker
 import dev.xxemail.sync.SnoozeWorker
+import dev.xxemail.sync.SyncScheduler
+import dev.xxemail.sync.SyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import retrofit2.HttpException
 import java.io.File
 import java.io.FileOutputStream
@@ -67,6 +78,7 @@ class MailRepository(
     private val messageDao: MessageDao,
     private val outboxDao: OutboxDao,
     private val wakeDao: SnoozeWakeDao,
+    private val folderPageDao: FolderPageDao,
     private val settings: SettingsRepository,
     private val workManager: WorkManager,
     private val appContext: Context,
@@ -107,19 +119,21 @@ class MailRepository(
             )
             syncLabels()
 
-            val beforeSyncAt = System.currentTimeMillis()
             val storedHistoryId = existing?.historyId
             val endHistoryId = profile.historyId
-            if (storedHistoryId == null || forceFull || endHistoryId == null) {
+            // Full passes (first sync of an account, forced rebuild, missing end id) see the
+            // whole mailbox at once — snapshot-less ⇒ NewMailDetector suppresses notifications.
+            val fullPass = storedHistoryId == null || forceFull || endHistoryId == null
+            val knownInboxIdsBefore = if (fullPass) null else threadDao.inboxAll(accountEmail).map { it.id }.toSet()
+            if (fullPass) {
                 initialSync()
                 accountDao.updateSyncPoint(accountEmail, endHistoryId, System.currentTimeMillis())
             } else {
-                deltaSync(storedHistoryId, endHistoryId)
+                deltaSync(storedHistoryId!!, endHistoryId)
             }
 
-            val newThreads = threadDao.inboxAll(accountEmail)
-                .filter { it.date > beforeSyncAt && it.unreadCount > 0 }
-            Result.success(SyncResult(newThreads))
+            val unreadNow = threadDao.inboxAll(accountEmail).filter { it.unreadCount > 0 }
+            Result.success(SyncResult(NewMailDetector.newArrivals(knownInboxIdsBefore, unreadNow)))
         }.getOrElse {
             Log.w(TAG, "sync failed for $accountEmail", it)
             Result.failure(it)
@@ -140,7 +154,7 @@ class MailRepository(
         if (rows.isNotEmpty()) labelDao.upsertAll(rows)
     }
 
-    /** Pull recent INBOX pages (bounded — keeps first-sync quota sane). */
+    /** Pull recent INBOX pages (bounded — keeps first-sync quota sane); saves the continuation token for "load more". */
     private suspend fun initialSync() {
         var pageToken: String? = null
         var pages = 0
@@ -152,12 +166,18 @@ class MailRepository(
             pages++
         } while (pageToken != null && pages < 4)
         hydrateThreads(threadIds.toList())
+        saveFolderPage(INBOX_PAGE_KEY, pageToken)
+    }
+
+    private suspend fun saveFolderPage(key: String, token: String?) {
+        folderPageDao.upsert(FolderPageEntity(accountEmail = accountEmail, folderKey = key, nextPageToken = token))
     }
 
     /**
      * Delta sync via history.list (2 quota units). Affected threads are rebuilt wholesale
-     * from threads.get (10 units each, capped per pass; overflow stops paging so the next
-     * pass resumes at the last fully processed history id).
+     * from threads.get (10 units each, capped per pass; overflow stops paging so the
+     * checkpoint only advances past fully hydrated items and the overflow window is
+     * re-walked by an immediate follow-up sync — never silently skipped).
      * HTTP 404 ⇒ stored historyId expired ⇒ bounded full resync.
      *
      * History ids are opaque uint64 strings from Gmail — they are only ever compared or
@@ -167,41 +187,28 @@ class MailRepository(
         val touchedThreadIds = LinkedHashSet<String>()
         val messageIdsNeedingLookup = LinkedHashSet<String>()
         val deletedMessageIds = LinkedHashSet<String>()
-        var lastProcessedId = startHistoryId
+        var lastFullyProcessedId = startHistoryId
         var sawAnyItem = false
+        var sawOverflow = false
         var pageToken: String? = null
 
         try {
-            do {
+            paging@ while (true) {
                 val page = api.listHistory(startHistoryId = startHistoryId, pageToken = pageToken)
-                page.history.forEach { item ->
+                for (item in page.history) {
                     sawAnyItem = true
-                    item.messagesAdded.forEach { added ->
-                        val m = added.message
-                        if (m?.threadId != null) touchedThreadIds.add(m.threadId!!)
-                        else m?.id?.let(messageIdsNeedingLookup::add)
+                    collectHistoryRefs(item, touchedThreadIds, messageIdsNeedingLookup, deletedMessageIds)
+                    if (touchedThreadIds.size + messageIdsNeedingLookup.size > MAX_THREADS_PER_DELTA) {
+                        // More work than one pass can hydrate. This item's contribution stays
+                        // unprocessed: the checkpoint below stops at the previous item, so the
+                        // follow-up sync re-walks it instead of skipping the overflow window.
+                        sawOverflow = true
+                        break@paging
                     }
-                    item.labelsAdded.forEach { change ->
-                        change.message?.threadId?.let(touchedThreadIds::add)
-                            ?: change.message?.id?.let(messageIdsNeedingLookup::add)
-                    }
-                    item.labelsRemoved.forEach { change ->
-                        change.message?.threadId?.let(touchedThreadIds::add)
-                            ?: change.message?.id?.let(messageIdsNeedingLookup::add)
-                    }
-                    item.messagesDeleted.forEach { removed -> removed.message?.id?.let(deletedMessageIds::add) }
+                    lastFullyProcessedId = item.id
                 }
-                pageToken = page.nextPageToken
-                val overBudget =
-                    touchedThreadIds.size + messageIdsNeedingLookup.size > MAX_THREADS_PER_DELTA
-                if (overBudget && pageToken != null) {
-                    // More work than one pass can hydrate. Stop paging without advancing the
-                    // checkpoint past this page; the next sync resumes right here.
-                    break
-                }
-                // Page fully processed → its last history id becomes the checkpoint.
-                page.history.lastOrNull()?.let { lastProcessedId = it.id }
-            } while (pageToken != null)
+                pageToken = page.nextPageToken ?: break
+            }
         } catch (e: HttpException) {
             if (e.code() == 404) {
                 Log.i(TAG, "history expired for $accountEmail — full resync")
@@ -230,8 +237,42 @@ class MailRepository(
 
         // Persist the last fully processed history id string as-is. With an empty window,
         // fall back to the profile's current id so the checkpoint still advances.
-        val checkpoint = if (sawAnyItem) lastProcessedId else fallbackEnd ?: startHistoryId
+        val checkpoint = if (sawAnyItem) lastFullyProcessedId else fallbackEnd ?: startHistoryId
         accountDao.updateSyncPoint(accountEmail, checkpoint, System.currentTimeMillis())
+        if (sawOverflow) scheduleFollowUpDelta()
+    }
+
+    /**
+     * Overflow pass: drain the remaining history window right away instead of waiting up
+     * to a full polling interval. The next run resumes exactly at the persisted checkpoint;
+     * REPLACE keeps at most one follow-up queued.
+     */
+    private fun scheduleFollowUpDelta() {
+        workManager.enqueueUniqueWork(
+            SyncScheduler.UNIQUE_ONESHOT,
+            ExistingWorkPolicy.REPLACE,
+            OneTimeWorkRequestBuilder<SyncWorker>()
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .build(),
+        )
+    }
+
+    /** Gmail sometimes fills only `messages` without the typed lists — walk every shape. */
+    private fun collectHistoryRefs(
+        item: HistoryItem,
+        touchedThreadIds: MutableSet<String>,
+        messageIdsNeedingLookup: MutableSet<String>,
+        deletedMessageIds: MutableSet<String>,
+    ) {
+        fun handleRef(refMessage: dev.xxemail.data.api.MessageRef?) {
+            refMessage?.threadId?.let(touchedThreadIds::add)
+                ?: refMessage?.id?.let(messageIdsNeedingLookup::add)
+        }
+        item.messages.forEach { handleRef(it.message) }
+        item.messagesAdded.forEach { handleRef(it.message) }
+        item.labelsAdded.forEach { handleRef(it.message) }
+        item.labelsRemoved.forEach { handleRef(it.message) }
+        item.messagesDeleted.forEach { removed -> removed.message?.id?.let(deletedMessageIds::add) }
     }
 
     /** One threads.get per id → aggregate row + per-message rows. */
@@ -244,7 +285,7 @@ class MailRepository(
                 .onFailure { Log.w(TAG, "threads.get($id) failed", it) }
                 .getOrNull()
                 ?.let { full ->
-                    threadRows += toThreadEntity(full)
+                    threadRows += ThreadAggregation.build(accountEmail, full, threadDao.get(accountEmail, full.id)?.snoozedUntil)
                     messageRows += full.messages.map { toMessageEntity(it, full.id) }
                 }
         }
@@ -256,7 +297,8 @@ class MailRepository(
     suspend fun ensureHydrated(folder: MailboxFolder) {
         when {
             folder.category != null -> {
-                if (threadDao.count(accountEmail) == 0) {
+                // Judge by THIS category's own count — a populated inbox must not starve an empty tab.
+                if (threadDao.countInboxCategory(accountEmail, folder.category.orEmpty(), folder.includeEmptyPrimary) == 0) {
                     hydrateFromQuery(labelIds = listOf("INBOX", folder.category!!))
                 }
             }
@@ -279,8 +321,53 @@ class MailRepository(
         hydrateThreads(page.threads.map { it.id })
     }
 
+    // ------------------------------------------------------------------ load more
+
+    /** Server list params for a folder; null ⇒ local-only view (no paging). */
+    private fun folderListQuery(folder: MailboxFolder): Pair<List<String>?, Boolean>? = when {
+        folder.category != null -> listOf("INBOX", folder.category!!) to false
+        folder.labelId != null -> listOf(folder.labelId!!) to (folder.labelId == "TRASH" || folder.labelId == "SPAM")
+        folder == MailboxFolder.ALL_MAIL -> null to false
+        else -> null
+    }
+
+    /** Inbox tabs share one underlying INBOX listing → one cursor for all of them. */
+    private fun folderPageKey(folder: MailboxFolder): String? = when {
+        folder.category != null -> INBOX_PAGE_KEY
+        folder.labelId != null -> folder.labelId
+        folder == MailboxFolder.ALL_MAIL -> folder.name
+        else -> null
+    }
+
+    suspend fun hasMorePages(folder: MailboxFolder): Boolean = withContext(Dispatchers.IO) {
+        val key = folderPageKey(folder) ?: return@withContext false
+        folderPageDao.get(accountEmail, key)?.nextPageToken != null
+    }
+
+    /** Fetches the next page from the stored cursor and persists the new one; true when more remain. */
+    suspend fun loadMore(folder: MailboxFolder): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val key = folderPageKey(folder) ?: return@runCatching false
+            val token = folderPageDao.get(accountEmail, key)?.nextPageToken ?: return@runCatching false
+            val (labelIds, spamTrash) = folderListQuery(folder)!!
+            val page = api.listThreads(
+                labelIds = labelIds,
+                maxResults = PAGE_SIZE,
+                pageToken = token,
+                includeSpamTrash = spamTrash,
+            )
+            hydrateThreads(page.threads.map { it.id })
+            saveFolderPage(key, page.nextPageToken)
+            page.nextPageToken != null
+        }.getOrElse {
+            Log.w(TAG, "loadMore(${folder.name}) failed for $accountEmail", it)
+            false
+        }
+    }
+
     // ------------------------------------------------------------------ reading
 
+    @Serializable
     data class AttachmentMeta(
         val messageId: String,
         val attachmentId: String,
@@ -297,26 +384,45 @@ class MailRepository(
     )
 
     private val fullCache = LinkedHashMap<String, List<FullMessage>>()
+    private val json = Json { ignoreUnknownKeys = true }
 
     /** Fetches full bodies for a thread (lazy — sync stores metadata only). */
     suspend fun loadFullThread(threadId: String): List<FullMessage> = withContext(Dispatchers.IO) {
         fullCache[threadId]?.let { return@withContext it }
         val result = messageDao.listForThread(accountEmail, threadId).map { row ->
             if (row.bodyFetched) {
-                FullMessage(row, row.bodyHtml, row.bodyPlain, emptyList())
+                FullMessage(row, row.bodyHtml, row.bodyPlain, decodeAttachments(row))
             } else {
                 val full = runCatching { api.getMessage(row.id, format = "full") }.getOrNull()
-                val html = full?.findBody("text/html")?.body?.data?.let(::decodeBase64Url)
-                val plain = full?.findBody("text/plain")?.body?.data?.let(::decodeBase64Url)
-                val atts = full?.attachments().orEmpty()
-                messageDao.updateBodies(accountEmail, row.id, html, plain)
-                FullMessage(row.copy(bodyHtml = html, bodyPlain = plain, bodyFetched = true), html, plain, atts)
+                val payload = full?.payload
+                if (payload == null) {
+                    // Fetch failed or response unusable: leave bodyFetched = false so the next
+                    // open retries instead of permanently caching an empty body.
+                    FullMessage(row, row.bodyHtml, row.bodyPlain, emptyList())
+                } else {
+                    val html = MessageParts.findBody(payload, "text/html")?.body?.data?.let(::decodeBase64Url)
+                    val plain = MessageParts.findBody(payload, "text/plain")?.body?.data?.let(::decodeBase64Url)
+                    val atts = MessageParts.attachments(row.id, payload).map {
+                        AttachmentMeta(it.messageId, it.attachmentId, it.filename, it.mimeType, it.size)
+                    }
+                    val attJson = runCatching { json.encodeToString(atts) }.getOrNull()
+                    messageDao.updateBodies(accountEmail, row.id, html, plain, attJson)
+                    FullMessage(row.copy(bodyHtml = html, bodyPlain = plain, bodyFetched = true, attachmentsJson = attJson), html, plain, atts)
+                }
             }
         }
-        fullCache[threadId] = result
-        while (fullCache.size > 12) fullCache.remove(fullCache.keys.first())
+        // Only cache fully-fetched threads; failed fetches must stay retryable.
+        if (result.all { it.entity.bodyFetched }) {
+            fullCache[threadId] = result
+            while (fullCache.size > 12) fullCache.remove(fullCache.keys.first())
+        }
         result
     }
+
+    private fun decodeAttachments(row: MessageEntity): List<AttachmentMeta> =
+        row.attachmentsJson?.takeIf { it.isNotBlank() }
+            ?.let { src -> runCatching { json.decodeFromString<List<AttachmentMeta>>(src) }.getOrNull() }
+            .orEmpty()
 
     /**
      * Downloads an attachment to `cacheDir/attachments` under a sanitized name.
@@ -365,24 +471,45 @@ class MailRepository(
 
     // ------------------------------------------------------------------ actions
 
+    /**
+     * Local-first aggregate update so folders move immediately, before any hydrate.
+     * Never skipped, even when the server call later fails — the next delta sync
+     * reconciles any divergence.
+     */
+    private suspend fun mutateLocal(threadIds: List<String>, transform: (ThreadEntity) -> ThreadEntity) {
+        val rows = threadIds.mapNotNull { threadDao.get(accountEmail, it) }
+        if (rows.isNotEmpty()) threadDao.upsertAll(rows.map(transform))
+    }
+
     suspend fun archive(threadIds: List<String>): Undoable {
+        mutateLocal(threadIds) {
+            it.copy(inInbox = false, labelsCsv = LabelCsv.remove(it.labelsCsv, "INBOX"))
+        }
         threadIds.forEach { api.modifyThread(it, ModifyLabelsRequest(removeLabelIds = listOf("INBOX"))) }
-        threadIds.forEach { threadDao.setInInbox(accountEmail, it, false) }
         return Undoable("Archived") {
             threadIds.forEach {
                 api.modifyThread(it, ModifyLabelsRequest(addLabelIds = listOf("INBOX")))
-                threadDao.setInInbox(accountEmail, it, true)
+            }
+            mutateLocal(threadIds) {
+                it.copy(inInbox = true, labelsCsv = LabelCsv.add(it.labelsCsv, "INBOX"))
             }
         }
     }
 
     suspend fun trash(threadIds: List<String>): Undoable {
+        val before = threadIds.mapNotNull { threadDao.get(accountEmail, it) }
+        mutateLocal(threadIds) {
+            it.copy(
+                inInbox = false,
+                labelsCsv = LabelCsv.add(LabelCsv.remove(it.labelsCsv, "INBOX"), "TRASH"),
+            )
+        }
         threadIds.forEach { api.trashThread(it) }
-        threadIds.forEach { threadDao.setInInbox(accountEmail, it, false) }
         return Undoable("Moved to Trash") {
-            threadIds.forEach {
-                api.untrashThread(it)
-                threadDao.setInInbox(accountEmail, it, true)
+            threadIds.forEach { api.untrashThread(it) }
+            // Reverse both sides verbatim: prior Inbox membership and prior label set.
+            before.forEach { row ->
+                threadDao.setInboxAndLabels(accountEmail, row.id, row.inInbox, row.labelsCsv)
             }
         }
     }
@@ -390,28 +517,48 @@ class MailRepository(
     suspend fun toggleStar(threadId: String, starred: Boolean): Undoable {
         val req = if (starred) ModifyLabelsRequest(addLabelIds = listOf("STARRED"))
         else ModifyLabelsRequest(removeLabelIds = listOf("STARRED"))
+        mutateLocal(listOf(threadId)) {
+            it.copy(
+                starred = starred,
+                labelsCsv = if (starred) LabelCsv.add(it.labelsCsv, "STARRED") else LabelCsv.remove(it.labelsCsv, "STARRED"),
+            )
+        }
         api.modifyThread(threadId, req)
-        threadDao.setStarred(accountEmail, threadId, starred)
         return Undoable(if (starred) "Starred" else "Unstarred") { toggleStar(threadId, !starred) }
     }
 
     suspend fun markRead(threadIds: List<String>, read: Boolean): Undoable {
         val req = if (read) ModifyLabelsRequest(removeLabelIds = listOf("UNREAD"))
         else ModifyLabelsRequest(addLabelIds = listOf("UNREAD"))
+        mutateLocal(threadIds) {
+            it.copy(
+                unreadCount = if (read) 0 else maxOf(it.unreadCount, 1),
+                labelsCsv = if (read) LabelCsv.remove(it.labelsCsv, "UNREAD") else LabelCsv.add(it.labelsCsv, "UNREAD"),
+            )
+        }
         threadIds.forEach { api.modifyThread(it, req) }
-        threadIds.forEach { threadDao.applyRead(accountEmail, it, read) }
         return Undoable(if (read) "Marked read" else "Marked unread") { markRead(threadIds, !read) }
     }
 
     suspend fun reportSpam(threadIds: List<String>): Undoable {
+        mutateLocal(threadIds) {
+            it.copy(
+                inInbox = false,
+                labelsCsv = LabelCsv.add(LabelCsv.remove(it.labelsCsv, "INBOX"), "SPAM"),
+            )
+        }
         threadIds.forEach {
             api.modifyThread(it, ModifyLabelsRequest(addLabelIds = listOf("SPAM"), removeLabelIds = listOf("INBOX")))
         }
-        threadIds.forEach { threadDao.setInInbox(accountEmail, it, false) }
         return Undoable("Reported spam") {
             threadIds.forEach {
                 api.modifyThread(it, ModifyLabelsRequest(removeLabelIds = listOf("SPAM"), addLabelIds = listOf("INBOX")))
-                threadDao.setInInbox(accountEmail, it, true)
+            }
+            mutateLocal(threadIds) {
+                it.copy(
+                    inInbox = true,
+                    labelsCsv = LabelCsv.add(LabelCsv.remove(it.labelsCsv, "SPAM"), "INBOX"),
+                )
             }
         }
     }
@@ -433,8 +580,10 @@ class MailRepository(
      */
     suspend fun snooze(threadId: String, wakeAt: Long): Undoable {
         threadDao.setSnoozed(accountEmail, threadId, wakeAt)
+        mutateLocal(listOf(threadId)) {
+            it.copy(inInbox = false, labelsCsv = LabelCsv.remove(it.labelsCsv, "INBOX"))
+        }
         api.modifyThread(threadId, ModifyLabelsRequest(removeLabelIds = listOf("INBOX")))
-        threadDao.setInInbox(accountEmail, threadId, false)
         wakeDao.upsert(SnoozeWakeEntity(accountEmail = accountEmail, threadId = threadId, targetAt = wakeAt))
         scheduleWake(threadId, wakeAt)
         return Undoable("Snoozed") { unsnooze(threadId) }
@@ -459,14 +608,19 @@ class MailRepository(
         val before = threadDao.get(accountEmail, threadId)
         wakeDao.delete(accountEmail, threadId)
         threadDao.setSnoozed(accountEmail, threadId, null)
-        threadDao.setInInbox(accountEmail, threadId, true)
+        threadDao.setInboxAndLabels(
+            accountEmail,
+            threadId,
+            true,
+            LabelCsv.add(before?.labelsCsv.orEmpty(), "INBOX"),
+        )
         try {
             api.modifyThread(threadId, ModifyLabelsRequest(addLabelIds = listOf("INBOX")))
         } catch (t: Throwable) {
             Log.w(TAG, "Unsnooze server call failed for $threadId — rolling back", t)
             before?.let {
                 threadDao.setSnoozed(accountEmail, threadId, it.snoozedUntil)
-                threadDao.setInInbox(accountEmail, threadId, it.inInbox)
+                threadDao.setInboxAndLabels(accountEmail, threadId, it.inInbox, it.labelsCsv)
                 if (it.snoozedUntil != null) {
                     wakeDao.upsert(
                         SnoozeWakeEntity(accountEmail = accountEmail, threadId = threadId, targetAt = it.snoozedUntil),
@@ -608,31 +762,6 @@ class MailRepository(
 
     // ------------------------------------------------------------------ mapping helpers
 
-    private suspend fun toThreadEntity(thread: Thread): ThreadEntity {
-        val msgs = thread.messages
-        val latest = msgs.maxByOrNull { it.internalDate?.toLongOrNull() ?: 0L }
-            ?: Message(id = thread.id, threadId = thread.id)
-        val labelsUnion = msgs.flatMapTo(LinkedHashSet()) { it.labelIds }
-        val (name, _) = AddressUtils.split(header(latest, "From"))
-        return ThreadEntity(
-            accountEmail = accountEmail,
-            id = thread.id,
-            snippet = thread.snippet ?: latest.snippet.orEmpty(),
-            subject = header(latest, "Subject").ifBlank { "(no subject)" },
-            fromAddress = header(latest, "From"),
-            fromName = name,
-            date = latest.internalDate?.toLongOrNull() ?: 0L,
-            messageCount = msgs.size,
-            unreadCount = msgs.count { it.labelIds.contains("UNREAD") },
-            hasAttachments = msgs.any { hasAttachment(it) },
-            starred = labelsUnion.contains("STARRED"),
-            inInbox = latest.labelIds.contains("INBOX"),
-            categories = latest.labelIds.filter { it.startsWith("CATEGORY_") }.joinToString(","),
-            labelsCsv = labelsUnion.joinToString(","),
-            snoozedUntil = threadDao.get(accountEmail, thread.id)?.snoozedUntil,
-        )
-    }
-
     private fun toMessageEntity(m: Message, fallbackThreadId: String): MessageEntity = MessageEntity(
         accountEmail = accountEmail,
         id = m.id,
@@ -645,38 +774,13 @@ class MailRepository(
         snippet = m.snippet.orEmpty(),
         read = !m.labelIds.contains("UNREAD"),
         starred = m.labelIds.contains("STARRED"),
-        hasAttachments = hasAttachment(m),
+        hasAttachments = MessageParts.hasAttachment(m),
         labelsCsv = m.labelIds.joinToString(","),
         messageIdHeader = header(m, "Message-ID").ifEmpty { header(m, "Message-Id") },
     )
 
-    private fun hasAttachment(m: Message): Boolean =
-        m.payload?.let { p -> !p.filename.isNullOrBlank() || p.parts.any { !it.filename.isNullOrBlank() } } == true
-
     private fun header(m: Message, name: String): String =
         m.payload?.headers?.firstOrNull { it.name.equals(name, ignoreCase = true) }?.value.orEmpty()
-
-    private fun Message.findBody(mime: String): dev.xxemail.data.api.MessagePart? {
-        fun walk(part: dev.xxemail.data.api.MessagePart): dev.xxemail.data.api.MessagePart? {
-            if (part.mimeType == mime && part.body?.data != null) return part
-            part.parts.forEach { walk(it)?.let { hit -> return hit } }
-            return null
-        }
-        return payload?.let(::walk)
-    }
-
-    private fun Message.attachments(): List<AttachmentMeta> {
-        val out = mutableListOf<AttachmentMeta>()
-        fun walk(part: dev.xxemail.data.api.MessagePart) {
-            val body = part.body
-            if (!part.filename.isNullOrBlank() && body?.attachmentId != null) {
-                out += AttachmentMeta(id, body.attachmentId!!, part.filename!!, part.mimeType.orEmpty(), body.size)
-            }
-            part.parts.forEach(::walk)
-        }
-        payload?.let(::walk)
-        return out
-    }
 
     private fun decodeBase64Url(data: String): String = try {
         String(Base64.getUrlDecoder().decode(data), Charsets.UTF_8)
@@ -699,6 +803,9 @@ class MailRepository(
     companion object {
         private const val TAG = "MailRepository"
         private const val MAX_THREADS_PER_DELTA = 60
+        /** Page-key shared by all inbox category tabs (one INBOX listing, one cursor). */
+        private const val INBOX_PAGE_KEY = "INBOX"
+        private const val PAGE_SIZE = 50
 
         /** Decoded-attachment memory cap (reuses the compose-time attachment budget). */
         val MAX_DOWNLOAD_BYTES: Long = MimeComposer.MAX_TOTAL_ATTACHMENT_BYTES

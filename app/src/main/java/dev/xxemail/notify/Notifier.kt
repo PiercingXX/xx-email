@@ -42,17 +42,23 @@ object Notifier {
             return
         }
 
-        val contentIntent = PendingIntent.getActivity(
-            context,
-            accountEmail.hashCode(),
-            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-
         val notifier = NotificationManagerCompat.from(context)
         val groupKey = GROUP_PREFIX + accountEmail
 
+        // Tapping opens the account mailbox — ideally the exact thread (see MainActivity extras).
+        fun mailIntent(threadId: String?): Intent =
+            Intent(context, MainActivity::class.java)
+                .putExtra(MainActivity.EXTRA_ACCOUNT, accountEmail)
+                .putExtra(MainActivity.EXTRA_THREAD_ID, threadId)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
         newThreads.take(MAX_INDIVIDUAL).forEach { thread ->
+            val contentIntent = PendingIntent.getActivity(
+                context,
+                ("mail-" + accountEmail + "-" + thread.id).hashCode(),
+                mailIntent(thread.id),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
             val notification = NotificationCompat.Builder(context, CHANNEL_MAIL)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle(thread.fromName.ifBlank { thread.fromAddress })
@@ -66,6 +72,12 @@ object Notifier {
         }
 
         if (newThreads.size > 1) {
+            val summaryIntent = PendingIntent.getActivity(
+                context,
+                ("summary-" + accountEmail).hashCode(),
+                mailIntent(null),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
             val summary = NotificationCompat.Builder(context, CHANNEL_MAIL)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle(accountEmail)
@@ -73,7 +85,7 @@ object Notifier {
                 .setGroup(groupKey)
                 .setGroupSummary(true)
                 .setAutoCancel(true)
-                .setContentIntent(contentIntent)
+                .setContentIntent(summaryIntent)
                 .build()
             notifier.notify(("summary-" + accountEmail).hashCode(), summary)
         }
