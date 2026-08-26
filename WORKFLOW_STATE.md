@@ -10,7 +10,7 @@ Package: `dev.xxemail`. License target: GPL-3.0-or-later. minSdk 26 / target 35.
 - Sync: WorkManager poll (15-min floor) + history.list delta (404 => full resync). No push v1 (needs Pub/Sub relay).
 - Snooze / scheduled send / undo-send: local outbox table + OneTimeWorkRequest; cancel-on-undo.
 - MIME: Eclipse Angus Mail (jakarta.mail) -> base64url `raw`, sent via uploadType=media.
-- Local DB: plaintext Room v1 (relies on FBE + sandbox); SQLCipher hook point documented for v2.
+- Local DB: plaintext Room v3 with explicit migrations (relies on FBE + sandbox); SQLCipher hook point documented.
 - Remote images blocked by default in message view (tracking-pixel defense).
 
 ## Status log
@@ -20,14 +20,21 @@ Package: `dev.xxemail`. License target: GPL-3.0-or-later. minSdk 26 / target 35.
 - [x] Gates: XML validation PASS · 14/14 JVM unit tests PASS · `assembleDebug` PASS
       (19.5 MB APK) · `assembleRelease` R8 PASS (2.75 MB unsigned) · review-code pass:
       S0 proguard file created, S1 attachment size cap added + regression test,
-      S1 snooze-uninstall caveat documented; S2/S3 items tracked below.
+      S1 snooze-uninstall caveat documented.
 - [x] Docs: README (+feature matrix), PRIVACY.md, docs/oauth-setup.md, GPL-3.0 LICENSE.
+- [x] Phases A–F implemented (historyId strings + delta checkpoints, send-retry policy,
+      AppAuth redirect rework, token cache/durability, safe paths, durable snooze,
+      file-backed outbox, Room v3 explicit migrations, label-union threads, compose/send
+      fixes, shell/error UX, remote-image gate); 90+ JVM unit tests green.
+      Phase G device checks remain pending.
 
-## Known gaps / roadmap (S2/S3 from review)
-Full fix list (ship blockers through nits, ordered for implementation): **[TODO.md](TODO.md)**.
-Do not call v0.1.1 good to go until Phase A–C are done and Phase G live checks have run.
+## Known gaps / next work
+
+Everything still open — ship blockers through nits, ordered — lives in
+**[TODO.md](TODO.md)**. Do not call v0.1.1 good to go until the Phase G live checks
+have run on a device.
 
 Leftover notes not duplicated there:
-- Thread hydration is sequential `threads.get` calls (quota-fine; latency only; not a v0.1.1 blocker).
-- Notification small-icon uses the adaptive foreground (covered in TODO F8).
+- Thread hydration is sequential `threads.get` calls (quota-fine; latency only;
+  listed as non-blocking roadmap in TODO.md).
 

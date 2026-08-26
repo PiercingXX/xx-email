@@ -14,7 +14,8 @@ no advertising identifiers, no Firebase, no Google Play Services requirement.
 
 ## What stays on your device
 
-- OAuth tokens, encrypted with an AndroidKeyStore AES-GCM key (`data/auth/TokenStore.kt`).
+- OAuth tokens, encrypted with an AndroidKeyStore AES-GCM key
+  (`app/src/main/java/dev/xxemail/data/auth/TokenStore.kt`).
 - Cached mail metadata/bodies in a local Room database (plaintext, protected by Android
   file-based encryption + app sandbox; opt-in SQLCipher hardening is on the roadmap).
 - Attachment downloads in the app-private cache directory.
