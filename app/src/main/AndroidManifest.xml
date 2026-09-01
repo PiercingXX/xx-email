@@ -16,10 +16,12 @@
         </intent>
     </queries>
 
-    <!-- T1: scoped goal implemented — family theme-sync receiver (P0).
-         Gated by android:permission=THEME_SYNC (uses-permission only, no <permission>
-         declare); only the launcher family app can deliver. Maps the launcher's seven
-         presets + Custom onto the M3 scheme and restyles live (see ThemeSyncReceiver). -->
+    <!-- T1: scoped goal implemented -->
+    <!-- Family theme-sync receiver (P0). Gated by android:permission=THEME_SYNC
+         (uses-permission only, no <permission> declare — the permission is defined
+         in the launcher family app, this app merely consumes it), so only the
+         launcher family app can deliver preset broadcasts. Maps the launcher's
+         seven presets + Custom onto the M3 scheme and restyles live. -->
     <application
         android:name=".XxEmailApp"
         android:allowBackup="false"
