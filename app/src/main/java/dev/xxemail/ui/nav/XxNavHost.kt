@@ -55,15 +55,36 @@ fun XxNavHost(notificationAccount: String? = null, notificationThreadId: String?
         else -> Routes.mailbox(accounts!!.first().email)
     }
 
-    var pendingThreadNavigated by remember { mutableStateOf(false) }
-    LaunchedEffect(accounts) {
-        if (pendingThreadNavigated) return@LaunchedEffect
-        val account = notificationTargetAccount ?: return@LaunchedEffect
-        val threadId = notificationThreadId ?: return@LaunchedEffect
+    // A notification tap is honoured on cold start AND on a warm tap (process alive,
+    // singleTask): the target is keyed so a fresh intent re-runs this effect. The
+    // handledTarget guard stops us re-pushing the same thread on unrelated recompositions.
+    var handledTarget by remember { mutableStateOf<Pair<String, String?>?>(null) }
+    val currentBackStack = navController.currentBackStackEntry
+    LaunchedEffect(accounts, notificationTargetAccount, notificationThreadId, currentBackStack?.destination) {
+        val targetAccount = notificationTargetAccount ?: return@LaunchedEffect
+        val targetThreadId = notificationThreadId ?: return@LaunchedEffect
+        val target = targetAccount to targetThreadId
+        if (handledTarget == target) return@LaunchedEffect
         val current = navController.currentBackStackEntry
-        if (current?.destination?.route == Routes.MAILBOX && current.arguments?.getString("account") == account) {
-            pendingThreadNavigated = true
-            navController.navigate(Routes.thread(account, threadId))
+        when (val action = notificationTapAction(
+            currentRoute = current?.destination?.route,
+            currentAccount = current?.arguments?.getString("account"),
+            targetAccount = targetAccount,
+            targetThreadId = targetThreadId,
+        )) {
+            is NotificationTapAction.OpenThread -> {
+                handledTarget = target
+                navController.navigate(Routes.thread(action.account, action.threadId))
+            }
+            // Warm tap for a different screen/account: clear the stale stack and land on
+            // the target mailbox; the effect re-runs once that destination is current and
+            // then pushes the thread.
+            is NotificationTapAction.OpenMailbox -> {
+                navController.navigate(Routes.mailbox(action.account)) {
+                    popUpTo(Routes.MAILBOX) { inclusive = true }
+                }
+            }
+            NotificationTapAction.Noop -> Unit
         }
     }
 
