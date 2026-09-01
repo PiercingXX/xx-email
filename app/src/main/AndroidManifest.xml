@@ -13,6 +13,7 @@
         </intent>
     </queries>
 
+    <!-- T1: scoped goal implemented -->
     <application
         android:name=".XxEmailApp"
         android:allowBackup="false"
