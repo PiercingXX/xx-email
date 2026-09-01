@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.xxemail.ui.theme.ThemePreset
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -25,6 +26,7 @@ class SettingsRepository(private val context: Context) {
         val SWIPE_RIGHT = stringPreferencesKey("swipe_right_action")
         val THEME = stringPreferencesKey("theme_mode")
         val DYNAMIC_COLORS = booleanPreferencesKey("dynamic_colors")
+        val THEME_PRESET = stringPreferencesKey("theme_preset")
         val SEND_AND_ARCHIVE = booleanPreferencesKey("send_and_archive")
         val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
         val SYNC_MINUTES = intPreferencesKey("sync_interval_minutes")
@@ -38,6 +40,7 @@ class SettingsRepository(private val context: Context) {
     val swipeLeftFlow: Flow<SwipeAction> = context.settingsDataStore.data.map { enumOr(it[Keys.SWIPE_LEFT], SwipeAction.ARCHIVE) }
     val swipeRightFlow: Flow<SwipeAction> = context.settingsDataStore.data.map { enumOr(it[Keys.SWIPE_RIGHT], SwipeAction.DELETE) }
     val themeFlow: Flow<ThemeMode> = context.settingsDataStore.data.map { enumOr(it[Keys.THEME], ThemeMode.SYSTEM) }
+    val themePresetFlow: Flow<ThemePreset> = context.settingsDataStore.data.map { ThemePreset.fromId(it[Keys.THEME_PRESET]) }
     val dynamicColorsFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[Keys.DYNAMIC_COLORS] ?: true }
     val sendAndArchiveFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[Keys.SEND_AND_ARCHIVE] ?: false }
     val notificationsEnabledFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[Keys.NOTIFICATIONS_ENABLED] ?: true }
@@ -63,6 +66,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun setSwipeLeft(v: SwipeAction) = edit { it[Keys.SWIPE_LEFT] = v.name }
     suspend fun setSwipeRight(v: SwipeAction) = edit { it[Keys.SWIPE_RIGHT] = v.name }
     suspend fun setTheme(v: ThemeMode) = edit { it[Keys.THEME] = v.name }
+    suspend fun setThemePreset(v: ThemePreset) = edit { it[Keys.THEME_PRESET] = v.id }
     suspend fun setDynamicColors(v: Boolean) = edit { it[Keys.DYNAMIC_COLORS] = v }
     suspend fun setSendAndArchive(v: Boolean) = edit { it[Keys.SEND_AND_ARCHIVE] = v }
     suspend fun setNotificationsEnabled(v: Boolean) = edit { it[Keys.NOTIFICATIONS_ENABLED] = v }

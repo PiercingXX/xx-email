@@ -13,6 +13,7 @@ import androidx.lifecycle.lifecycleScope
 import dev.xxemail.data.repo.ThemeMode
 import dev.xxemail.ui.nav.LocalAuthLauncher
 import dev.xxemail.ui.nav.XxNavHost
+import dev.xxemail.ui.theme.ThemePreset
 import dev.xxemail.ui.theme.XxTheme
 import kotlinx.coroutines.launch
 import net.openid.appauth.AuthorizationException
@@ -42,6 +43,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val themeMode by graph.settings.themeFlow.collectAsStateWithLifecycle(ThemeMode.SYSTEM)
             val dynamicColors by graph.settings.dynamicColorsFlow.collectAsStateWithLifecycle(true)
+            val themePreset by graph.settings.themePresetFlow.collectAsStateWithLifecycle(ThemePreset.DEFAULT)
             XxTheme(
                 darkTheme = when (themeMode) {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
@@ -49,6 +51,7 @@ class MainActivity : ComponentActivity() {
                     ThemeMode.DARK -> true
                 },
                 dynamicColor = dynamicColors,
+                preset = themePreset,
             ) {
                 CompositionLocalProvider(LocalAuthLauncher provides ::launchOAuthFlow) {
                     XxNavHost(
