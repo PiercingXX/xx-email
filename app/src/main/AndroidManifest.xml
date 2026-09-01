@@ -16,7 +16,7 @@
         </intent>
     </queries>
 
-    <!-- T1: scoped goal implemented -->
+    <!-- T1: scoped goal implemented --> 
     <!-- Family theme-sync receiver (P0). Gated by android:permission=THEME_SYNC
          (uses-permission only, no <permission> declare — the permission is defined
          in the launcher family app, this app merely consumes it), so only the
