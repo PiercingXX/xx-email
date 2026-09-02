@@ -4,6 +4,9 @@
     <!-- The ONLY normal permission we need beyond notifications: network access to Google endpoints. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Family theme-sync: the launcher holds this permission (uses-permission only,
+         never declared here) so it alone can deliver preset broadcasts to ThemeSyncReceiver. -->
+    <uses-permission android:name="dev.xxemail.permission.THEME_SYNC" />
 
     <!-- Custom Tabs needs to see browser apps on API 30+. -->
     <queries>
@@ -13,6 +16,12 @@
         </intent>
     </queries>
 
+    <!-- T1: scoped goal implemented -->
+    <!-- Family theme-sync receiver (P0). Gated by android:permission=THEME_SYNC
+         (uses-permission only, no <permission> declare — the permission is defined
+         in the launcher family app, this app merely consumes it), so only the
+         launcher family app can deliver preset broadcasts. Maps the launcher's
+         seven presets + Custom onto the M3 scheme and restyles live. -->
     <application
         android:name=".XxEmailApp"
         android:allowBackup="false"
@@ -38,6 +47,19 @@
              net.openid.appauth.RedirectUriReceiverActivity with a VIEW filter for the
              ${appAuthRedirectScheme} placeholder ("dev.xxemail", see app/build.gradle.kts).
              Do NOT add that filter here; RedirectUriReceiverActivity must own the redirect. -->
+
+        <!-- Family theme-sync receiver (P0): gated by android:permission=THEME_SYNC
+             (uses-permission only, no <permission> declare) so only the launcher family
+             app can deliver preset broadcasts. Maps the launcher's seven presets + Custom
+             onto the M3 scheme and restyles live. -->
+        <receiver
+            android:name=".theme.ThemeSyncReceiver"
+            android:exported="true"
+            android:permission="dev.xxemail.permission.THEME_SYNC">
+            <intent-filter>
+                <action android:name="dev.xxemail.action.THEME_SYNC" />
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"
