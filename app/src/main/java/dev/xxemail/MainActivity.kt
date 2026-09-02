@@ -8,6 +8,8 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import dev.xxemail.data.repo.ThemeMode
@@ -32,13 +34,20 @@ class MainActivity : ComponentActivity() {
     /** A redirect that arrived before [launchOAuthFlow] registered [authCallback]. */
     private var pendingRedirect: Intent? = null
 
+    /**
+     * The account/thread a notification tap wants to open. Stateful so a tap that lands
+     * via [onNewIntent] while the process is alive (launchMode=singleTask) drives a
+     * recomposition of [XxNavHost] instead of being ignored — the activity is only
+     * recreated on a cold start, never on a warm tap.
+     */
+    private var notificationTarget by mutableStateOf<Pair<String, String?>?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val graph = (application as XxEmailApp).graph
 
         // New-mail notification taps carry the target account/thread (see Notifier).
-        val notificationAccount = intent?.getStringExtra(EXTRA_ACCOUNT)
-        val notificationThreadId = intent?.getStringExtra(EXTRA_THREAD_ID)
+        updateNotificationTarget(intent)
 
         setContent {
             val themeMode by graph.settings.themeFlow.collectAsStateWithLifecycle(ThemeMode.SYSTEM)
@@ -55,8 +64,8 @@ class MainActivity : ComponentActivity() {
             ) {
                 CompositionLocalProvider(LocalAuthLauncher provides ::launchOAuthFlow) {
                     XxNavHost(
-                        notificationAccount = notificationAccount,
-                        notificationThreadId = notificationThreadId,
+                        notificationAccount = notificationTarget?.first,
+                        notificationThreadId = notificationTarget?.second,
                     )
                 }
             }
@@ -64,6 +73,14 @@ class MainActivity : ComponentActivity() {
 
         // A redirect may arrive via onNewIntent before setContent finishes wiring a callback.
         intent?.let { maybeConsumeRedirect(it) }
+    }
+
+    /** Reads the notification-tap target off [intent]; no-op when the intent carries none. */
+    private fun updateNotificationTarget(intent: Intent?) {
+        val account = intent?.getStringExtra(EXTRA_ACCOUNT)
+        if (account != null) {
+            notificationTarget = account to intent.getStringExtra(EXTRA_THREAD_ID)
+        }
     }
 
     private fun launchOAuthFlow(onResult: (Result<String>) -> Unit) {
@@ -101,6 +118,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        // A warm notification tap (process alive, singleTask) arrives here, not in
+        // onCreate — surface it to the nav so the tap is honoured rather than ignored.
+        updateNotificationTarget(intent)
         maybeConsumeRedirect(intent)
     }
 
