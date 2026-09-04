@@ -20,7 +20,8 @@ sign-in which the old file marked done — re-verify on this phone.
 | ID | Decision |
 |---|---|
 | E1 | **Align to the family theme contract.** Same action + permission as calculator/weather/clock. |
-| E2 | Device smoke **is** the rest of v0.1.1. Drafts editor / PubSub / SQLCipher stay roadmap. |
+| E2 | Device smoke **is** the rest of v0.1.1. PubSub / SQLCipher stay roadmap. |
+| E3 | **Offline compose → outbox.** Write a mail with no network; it sends when back. |
 
 ---
 
@@ -64,11 +65,27 @@ that is **not** the only mail client.
 
 ---
 
+## E3 — Offline compose → outbox
+
+The outbox worker already exists. Airplane mode must still let you write.
+
+- [ ] Compose (new / reply / forward) works with no network. Send
+  enqueues; UI says **Queued**, not a failed send.
+- [ ] Back online: worker drains once. A 2xx is sent; do not retry a 2xx
+  (A2 still holds).
+- [ ] Opening Outbox shows queued + failed rows. Failed can retry or
+  discard.
+- [ ] Gmail **Drafts folder** can stay browse-only. This is not a draft
+  editor — it is an outbox.
+- **Accept:** airplane, write a reply, Send, kill the app, leave
+  airplane — it arrives once in Gmail web.
+
+---
+
 ## Housekeeping
 
 - [ ] Notifications: README still marks grouped notifications 🚧 — either
   prove D3 on device or keep the cone.
-- [ ] Drafts stay folder-only unless a new decision lands here.
 
 ---
 
