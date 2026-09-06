@@ -19,6 +19,8 @@ enum class MailboxFolder(
     STARRED("Starred"),
     SNOOZED("Snoozed"),
     SENT("Sent", labelId = "SENT"),
+    /** Local queued + failed sends. Not a Gmail label — Drafts stays browse-only. */
+    OUTBOX("Outbox"),
     DRAFTS("Drafts", labelId = "DRAFT"),
     SPAM("Spam", labelId = "SPAM"),
     TRASH("Trash", labelId = "TRASH"),

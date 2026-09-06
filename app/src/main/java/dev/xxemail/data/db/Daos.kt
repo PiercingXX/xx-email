@@ -142,6 +142,12 @@ interface OutboxDao {
     suspend fun get(id: Long): OutboxEntity?
     @Query("SELECT * FROM outbox WHERE state = 'QUEUED' ORDER BY targetAt ASC")
     fun observeQueued(): Flow<List<OutboxEntity>>
+    @Query(
+        """SELECT * FROM outbox
+           WHERE accountEmail = :account AND state IN ('QUEUED', 'FAILED', 'SENDING')
+           ORDER BY CASE state WHEN 'FAILED' THEN 0 WHEN 'SENDING' THEN 1 ELSE 2 END, createdAt DESC""",
+    )
+    fun observeOpenForAccount(account: String): Flow<List<OutboxEntity>>
     @Query("SELECT COUNT(*) FROM outbox WHERE accountEmail = :account AND state = 'FAILED'")
     fun observeFailedCount(account: String): Flow<Int>
     @Query("UPDATE outbox SET state = :state, error = :error WHERE id = :id")

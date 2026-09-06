@@ -26,7 +26,6 @@ import dev.xxemail.data.db.MessageDao
 import dev.xxemail.data.db.MessageEntity
 import dev.xxemail.data.db.OutboxDao
 import dev.xxemail.data.db.OutboxEntity
-import dev.xxemail.data.db.OutboxKind
 import dev.xxemail.data.db.OutboxState
 import dev.xxemail.data.db.SnoozeWakeDao
 import dev.xxemail.data.db.SnoozeWakeEntity
@@ -39,6 +38,7 @@ import dev.xxemail.domain.MailboxFolder
 import dev.xxemail.domain.SafePaths
 import dev.xxemail.sync.NewMailDetector
 import dev.xxemail.sync.OutboxFiles
+import dev.xxemail.sync.OutboxSend
 import dev.xxemail.sync.OutboxWorker
 import dev.xxemail.sync.SnoozeWorker
 import dev.xxemail.sync.SyncScheduler
@@ -100,6 +100,7 @@ class MailRepository(
         MailboxFolder.STARRED -> threadDao.observeStarred(accountEmail)
         MailboxFolder.SNOOZED -> threadDao.observeSnoozed(accountEmail)
         MailboxFolder.ALL_MAIL -> threadDao.observeAllMail(accountEmail)
+        MailboxFolder.OUTBOX -> kotlinx.coroutines.flow.emptyFlow()
         else -> threadDao.observeWithLabel(accountEmail, folder.labelId!!)
     }
 
@@ -432,6 +433,18 @@ class MailRepository(
     private val fullCacheMutex = Mutex()
     private val json = Json { ignoreUnknownKeys = true }
 
+    /**
+     * Local-only thread bodies for compose (E3). Uses the in-memory cache or
+     * already-fetched Room rows — never the Gmail API — so reply/forward
+     * prefills in airplane mode instead of hanging on a dead socket.
+     */
+    suspend fun cachedMessagesForCompose(threadId: String): List<FullMessage> = withContext(Dispatchers.IO) {
+        fullCacheMutex.withLock { fullCache[threadId] }?.let { return@withContext it }
+        messageDao.listForThread(accountEmail, threadId).map { row ->
+            FullMessage(row, row.bodyHtml, row.bodyPlain, decodeAttachments(row))
+        }
+    }
+
     /** Fetches full bodies for a thread (lazy — sync stores metadata only). */
     suspend fun loadFullThread(threadId: String): List<FullMessage> = withContext(Dispatchers.IO) {
         fullCacheMutex.withLock { fullCache[threadId] }?.let { return@withContext it }
@@ -720,9 +733,10 @@ class MailRepository(
     // ------------------------------------------------------------------ sending
 
     /**
-     * Enqueues a send through the local outbox. The actual API call is delayed by the undo
-     * window — cancelling within it is Gmail-style "Undo send". For scheduled sends the delay
-     * runs until [scheduledAt].
+     * Enqueues a send through the local outbox. Does not touch Gmail: MIME is
+     * composed on-device, the payload is written under `files/outbox/`, and
+     * WorkManager waits for CONNECTED (plus the undo window / schedule).
+     * Airplane mode is therefore a successful **Queued**, not a failed send.
      * Returns the outbox row id (used by undo).
      */
     suspend fun enqueueSend(request: ComposeRequest, scheduledAt: Long? = null): Long = withContext(Dispatchers.IO) {
@@ -742,38 +756,40 @@ class MailRepository(
             },
         )
         val bytes = Base64.getUrlDecoder().decode(raw)
-        val targetAt = scheduledAt ?: (System.currentTimeMillis() + settings.undoSeconds() * 1000L)
-        val kind = if (scheduledAt == null) OutboxKind.SEND else OutboxKind.SCHEDULED_SEND
+        val now = System.currentTimeMillis()
+        val plan = OutboxSend.plan(nowMs = now, undoSeconds = settings.undoSeconds(), scheduledAt = scheduledAt)
         val id = outboxDao.insert(
-            OutboxEntity(
+            OutboxSend.entity(
                 accountEmail = accountEmail,
-                kind = kind.name,
                 threadId = request.threadId,
-                rfc822Base64 = null, // payloads live on disk now; legacy column stays for migrated rows
                 subject = request.subject,
-                targetAt = targetAt,
+                plan = plan,
+                nowMs = now,
             ),
         )
-        val relativePath = try {
-            OutboxFiles.writeNew(appContext.filesDir, id, bytes)
+        try {
+            val (relativePath, size) = OutboxSend.writePayload(appContext.filesDir, id, bytes)
+            outboxDao.setPayload(id, relativePath, size)
         } catch (t: Throwable) {
             outboxDao.delete(id)
             throw t
         }
-        outboxDao.setPayload(id, relativePath, bytes.size.toLong())
-        val delay = (targetAt - System.currentTimeMillis()).coerceAtLeast(0)
+        enqueueOutboxWork(id, plan.initialDelayMs, ExistingWorkPolicy.KEEP)
+        id
+    }
+
+    private fun enqueueOutboxWork(id: Long, delayMs: Long, policy: ExistingWorkPolicy) {
         workManager.enqueueUniqueWork(
             OutboxWorker.workName(id),
-            ExistingWorkPolicy.KEEP,
+            policy,
             OneTimeWorkRequestBuilder<OutboxWorker>()
                 .setInputData(workDataOf(OutboxWorker.KEY_OUTBOX_ID to id))
-                .setInitialDelay(delay, TimeUnit.MILLISECONDS)
+                .setInitialDelay(delayMs, TimeUnit.MILLISECONDS)
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .addTag("outbox")
                 .build(),
         )
-        id
     }
 
     /**
@@ -798,6 +814,37 @@ class MailRepository(
     /** Count of sends stuck in FAILED state — surfaced for the mailbox failed-send banner. */
     fun observeFailedSends(): Flow<Int> = outboxDao.observeFailedCount(accountEmail)
 
+    /** Queued + failed + in-flight rows for the local Outbox folder (E3). */
+    fun observeOutbox(): Flow<List<OutboxEntity>> = outboxDao.observeOpenForAccount(accountEmail)
+
+    /**
+     * Retry one FAILED row: flip back to QUEUED and re-register work.
+     * Returns false when the row is missing, belongs to another account, or is not FAILED.
+     */
+    suspend fun retryFailedSend(outboxId: Long): Boolean = withContext(Dispatchers.IO) {
+        val row = outboxDao.get(outboxId) ?: return@withContext false
+        if (row.accountEmail != accountEmail || !OutboxSend.canRetry(row.state)) return@withContext false
+        outboxDao.setState(row.id, OutboxState.QUEUED.name, error = null)
+        enqueueOutboxWork(row.id, delayMs = 0, ExistingWorkPolicy.REPLACE)
+        true
+    }
+
+    /**
+     * Discard a QUEUED or FAILED row (payload file included). QUEUED also cancels
+     * the unique work. SENDING/SENT are refused — same race as undo.
+     */
+    suspend fun discardOutbox(outboxId: Long): Boolean = withContext(Dispatchers.IO) {
+        val row = outboxDao.get(outboxId) ?: return@withContext false
+        if (row.accountEmail != accountEmail || !OutboxSend.canDiscard(row.state)) return@withContext false
+        if (row.state == OutboxState.QUEUED.name) {
+            workManager.cancelUniqueWork(OutboxWorker.workName(outboxId))
+            if (outboxDao.cancelIfQueued(outboxId) == 0) return@withContext false
+        }
+        OutboxFiles.deletePayloadFile(appContext.filesDir, row.path, row.id)
+        outboxDao.delete(outboxId)
+        true
+    }
+
     /**
      * Retry-all for the failed-send banner: flips every FAILED row back to QUEUED and
      * re-registers its one-shot work. Returns how many rows were retried.
@@ -806,16 +853,7 @@ class MailRepository(
         val failed = outboxDao.failedForAccount(accountEmail)
         failed.forEach { row ->
             outboxDao.setState(row.id, OutboxState.QUEUED.name, error = null)
-            workManager.enqueueUniqueWork(
-                OutboxWorker.workName(row.id),
-                ExistingWorkPolicy.REPLACE,
-                OneTimeWorkRequestBuilder<OutboxWorker>()
-                    .setInputData(workDataOf(OutboxWorker.KEY_OUTBOX_ID to row.id))
-                    .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-                    .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-                    .addTag("outbox")
-                    .build(),
-            )
+            enqueueOutboxWork(row.id, delayMs = 0, ExistingWorkPolicy.REPLACE)
         }
         failed.size
     }

@@ -14,6 +14,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import dev.xxemail.appGraph
+import dev.xxemail.data.db.OutboxEntity
 import dev.xxemail.data.db.ThreadEntity
 import dev.xxemail.data.repo.SwipeAction
 import dev.xxemail.data.repo.Undoable
@@ -65,6 +66,10 @@ class MailboxViewModel(
     /** Sends that permanently failed (4xx / attempts exhausted) — shown as a banner. */
     val failedSends: StateFlow<Int> = repo.observeFailedSends()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    /** Local Outbox folder: queued + failed + in-flight rows for this account. */
+    val outbox: StateFlow<List<OutboxEntity>> = repo.observeOutbox()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val folderFlows = HashMap<MailboxFolder, StateFlow<List<ThreadEntity>>>()
 
@@ -203,6 +208,20 @@ class MailboxViewModel(
         viewModelScope.launch {
             val retried = runCatching { repo.retryFailedSends() }.getOrDefault(0)
             if (retried > 0) _messages.emit("Retrying $retried failed send${if (retried == 1) "" else "s"}…")
+        }
+    }
+
+    fun retryOutbox(outboxId: Long) {
+        viewModelScope.launch {
+            val ok = runCatching { repo.retryFailedSend(outboxId) }.getOrDefault(false)
+            if (ok) _messages.emit("Retrying send…")
+        }
+    }
+
+    fun discardOutbox(outboxId: Long) {
+        viewModelScope.launch {
+            val ok = runCatching { repo.discardOutbox(outboxId) }.getOrDefault(false)
+            if (!ok) _messages.emit("Could not discard — send already in progress")
         }
     }
 

@@ -22,6 +22,7 @@ import dev.xxemail.data.repo.OutgoingAttachment
 import dev.xxemail.di.AppGraph
 import dev.xxemail.domain.Recipients
 import dev.xxemail.domain.SafePaths
+import dev.xxemail.sync.OutboxSend
 import dev.xxemail.ui.components.SendEvents
 import dev.xxemail.ui.components.fullDate
 import kotlinx.coroutines.Dispatchers
@@ -133,7 +134,7 @@ class ComposeViewModel(
             // One fetch serves the quote AND threading headers (closure 1): when the
             // messages.get(full) payload exposes the parent's References header, replies
             // seed the whole chain instead of parent-only.
-            val full = runCatching { repo.loadFullThread(original.threadId) }.getOrDefault(emptyList())
+            val full = runCatching { repo.cachedMessagesForCompose(original.threadId) }.getOrDefault(emptyList())
             val quotedFull = full.firstOrNull { it.entity.id == quoteMessageId }
             referencesHeader = quotedFull?.referencesHeader
 
@@ -152,7 +153,7 @@ class ComposeViewModel(
 
     /** Downloads the offered originals into the attachment list (existing repo method). */
     private suspend fun loadForwardAttachmentOffer(quoteMessageId: String, threadId: String) {
-        val full = runCatching { repo.loadFullThread(threadId) }.getOrDefault(emptyList())
+        val full = runCatching { repo.cachedMessagesForCompose(threadId) }.getOrDefault(emptyList())
         offeredForwardAttachments = full
             .firstOrNull { it.entity.id == quoteMessageId }
             ?.attachments
@@ -258,7 +259,7 @@ class ComposeViewModel(
                     SendEvents.QueuedSend(
                         accountEmail = account,
                         outboxId = outboxId,
-                        label = if (scheduledAt == null) "Sending…" else "Send scheduled",
+                        label = OutboxSend.queuedLabel(scheduled = scheduledAt != null),
                     ),
                 )
                 onQueued()

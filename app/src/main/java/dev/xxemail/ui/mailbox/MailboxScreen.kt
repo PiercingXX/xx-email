@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.filled.Label
+import androidx.compose.material.icons.filled.Outbox
 import androidx.compose.material.icons.filled.MarkEmailUnread
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
@@ -63,10 +64,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.xxemail.appGraph
+import dev.xxemail.data.db.OutboxEntity
+import dev.xxemail.data.db.OutboxState
 import dev.xxemail.data.repo.SwipeAction
 import dev.xxemail.domain.INBOX_TABS
 import dev.xxemail.domain.MailboxFolder
 import dev.xxemail.domain.SnoozePresets
+import dev.xxemail.sync.OutboxSend
 import dev.xxemail.ui.components.Avatar
 import dev.xxemail.ui.components.EmptyState
 import dev.xxemail.ui.components.SendEvents
@@ -77,7 +81,16 @@ import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.launch
 
 private val OTHER_FOLDERS =
-    listOf(MailboxFolder.STARRED, MailboxFolder.SNOOZED, MailboxFolder.SENT, MailboxFolder.DRAFTS, MailboxFolder.SPAM, MailboxFolder.TRASH, MailboxFolder.ALL_MAIL)
+    listOf(
+        MailboxFolder.STARRED,
+        MailboxFolder.SNOOZED,
+        MailboxFolder.SENT,
+        MailboxFolder.OUTBOX,
+        MailboxFolder.DRAFTS,
+        MailboxFolder.SPAM,
+        MailboxFolder.TRASH,
+        MailboxFolder.ALL_MAIL,
+    )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -189,7 +202,7 @@ fun MailboxScreen(
                     onSignInAgain = onSignInAgain,
                 )
             }
-            if (failedSends > 0) {
+            if (failedSends > 0 && vm.folder != MailboxFolder.OUTBOX) {
                 FailedSendsBanner(count = failedSends, onRetry = { vm.retryFailedSends() })
             }
             val currentFolder = vm.folder
@@ -206,6 +219,8 @@ fun MailboxScreen(
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                     ThreadListPage(vm, INBOX_TABS[page], onOpenThread, swipeLeft, swipeRight, onSnooze = { snoozeTargets = listOf(it) })
                 }
+            } else if (currentFolder == MailboxFolder.OUTBOX) {
+                OutboxPage(vm)
             } else {
                 ThreadListPage(vm, currentFolder, onOpenThread, swipeLeft, swipeRight, onSnooze = { snoozeTargets = listOf(it) })
             }
@@ -255,6 +270,53 @@ private fun ReauthBanner(message: String, onSignInAgain: () -> Unit) {
             TextButton(onClick = onSignInAgain) { Text("Sign in again") }
         }
     }
+}
+
+@Composable
+private fun OutboxPage(vm: MailboxViewModel) {
+    val rows by vm.outbox.collectAsStateWithLifecycle()
+    if (rows.isEmpty()) {
+        EmptyState("Nothing queued")
+    } else {
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(rows, key = { it.id }) { row ->
+                OutboxRow(
+                    row = row,
+                    onRetry = { vm.retryOutbox(row.id) },
+                    onDiscard = { vm.discardOutbox(row.id) },
+                )
+                HorizontalDivider()
+            }
+        }
+    }
+}
+
+@Composable
+private fun OutboxRow(
+    row: OutboxEntity,
+    onRetry: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    val status = when (row.state) {
+        OutboxState.FAILED.name -> "Failed" + (row.error?.let { " — $it" } ?: "")
+        OutboxState.SENDING.name -> "Sending"
+        OutboxState.QUEUED.name -> if (row.kind == "SCHEDULED_SEND") "Scheduled" else "Queued"
+        else -> row.state
+    }
+    ListItem(
+        headlineContent = { Text(row.subject.ifBlank { "(no subject)" }) },
+        supportingContent = { Text(status, style = MaterialTheme.typography.bodySmall) },
+        trailingContent = {
+            Row {
+                if (OutboxSend.canRetry(row.state)) {
+                    TextButton(onClick = onRetry) { Text("Retry") }
+                }
+                if (OutboxSend.canDiscard(row.state)) {
+                    TextButton(onClick = onDiscard) { Text("Discard") }
+                }
+            }
+        },
+    )
 }
 
 /** F3: N queued sends permanently failed — offer a retry-all. */
@@ -383,7 +445,9 @@ private fun AccountFolderSheet(
         OTHER_FOLDERS.forEach { folder ->
             ListItem(
                 headlineContent = { Text(folder.title) },
-                leadingContent = { Icon(Icons.Filled.Label, null) },
+                leadingContent = {
+                    Icon(if (folder == MailboxFolder.OUTBOX) Icons.Filled.Outbox else Icons.Filled.Label, null)
+                },
                 modifier = Modifier.clickable { onSelectFolder(folder) },
             )
         }
