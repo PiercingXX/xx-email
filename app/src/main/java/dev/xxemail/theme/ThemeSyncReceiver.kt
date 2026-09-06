@@ -3,34 +3,48 @@ package dev.xxemail.theme
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import dev.xxemail.appGraph
-import dev.xxemail.ui.theme.ThemePreset
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 
 /**
- * Family theme-sync receiver.
- *
- * The launcher (a sibling app in the same family, listed in its FAMILY_PACKAGES)
- * broadcasts the currently selected theme preset so every family app restyles in
- * lockstep. The receiver is declared with `android:permission="THEME_SYNC"` in the
- * manifest, so only a sender holding that (uses-permission-only, never declared)
- * permission can deliver to it. On receipt we persist the preset to DataStore;
- * MainActivity already collects [dev.xxemail.data.repo.SettingsRepository.themePresetFlow]
- * and re-applies the M3 scheme, so the change is live without a restart.
+ * Family theme-sync receiver. XX-Launcher broadcasts `xx.launcher.THEME_CHANGED`
+ * with per-package setPackage. This app uses-permission THEME_SYNC and gates
+ * the exported receiver with android:permission — it must NOT declare the
+ * permission (mixed debug keys).
  */
-class ThemeSyncReceiver : BroadcastReceiver() {
-
-    override fun onReceive(context: Context, intent: Intent) {
-        val preset = ThemePreset.fromId(intent.getStringExtra(EXTRA_PRESET))
-        CoroutineScope(Dispatchers.Default).launch {
-            context.appGraph.settings.setThemePreset(preset)
+class ThemeSyncReceiver(
+    private val action: String = ACTION_THEME_CHANGED,
+    private val extractAction: (Intent?) -> String? = { intent -> intent?.action },
+    private val extractThemeName: (Intent?) -> String? = { intent ->
+        intent?.getStringExtra(EXTRA_THEME_NAME)
+    },
+    private val extractBackground: (Intent?) -> Long? = { intent ->
+        if (intent != null && intent.hasExtra(EXTRA_BACKGROUND)) {
+            intent.getIntExtra(EXTRA_BACKGROUND, 0).toLong() and 0xFFFFFFFFL
+        } else {
+            null
         }
+    },
+    private val persistTheme: (Context?, SyncedTheme) -> Unit = { context, theme ->
+        if (context != null) ThemeStore.of(context).save(theme)
+    },
+    private val applyLive: (Context?, SyncedTheme) -> Unit = { _, theme ->
+        ThemeController.onThemeChanged(theme)
+    },
+) : BroadcastReceiver() {
+
+    override fun onReceive(context: Context?, intent: Intent?) {
+        if (extractAction(intent) != action) return
+        val theme = resolveSyncedTheme(
+            extractThemeName(intent),
+            extractBackground(intent),
+        ) ?: return
+        persistTheme(context, theme)
+        applyLive(context, theme)
     }
 
     companion object {
-        const val ACTION_THEME_SYNC = "dev.xxemail.action.THEME_SYNC"
-        const val EXTRA_PRESET = "dev.xxemail.extra.THEME_PRESET"
+        const val ACTION_THEME_CHANGED = "xx.launcher.THEME_CHANGED"
+        const val EXTRA_THEME_NAME = "xx.launcher.extra.THEME_NAME"
+        const val EXTRA_BACKGROUND = "xx.launcher.extra.BACKGROUND"
+        const val PERMISSION_THEME_SYNC = "com.piercingxx.xxlauncher.permission.THEME_SYNC"
     }
 }

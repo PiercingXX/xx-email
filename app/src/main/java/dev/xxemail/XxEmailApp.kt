@@ -6,6 +6,7 @@ import androidx.work.WorkManager
 import dev.xxemail.di.AppGraph
 import dev.xxemail.notify.Notifier
 import dev.xxemail.sync.SyncScheduler
+import dev.xxemail.theme.ThemeController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -18,6 +19,7 @@ class XxEmailApp : Application() {
     override fun onCreate() {
         super.onCreate()
         graph = AppGraph(this)
+        ThemeController.init(this)
         Notifier.ensureChannels(this)
         // Register the periodic poll with the SAVED interval (default 15). Async so we never
         // block startup on DataStore; WorkManager persists the request across reboots, so

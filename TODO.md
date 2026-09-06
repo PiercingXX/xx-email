@@ -8,8 +8,8 @@ Telemetry-free Gmail REST client. BYO OAuth. `INTERNET` required;
 egress is Google OAuth/Gmail only.
 
 ```
-Status: Compose nav, Room, WorkManager, AppAuth, 103 JVM tests.
-Receiver listens for the wrong action. Phase G unchecked except R8
+Status: Compose nav, Room, WorkManager, AppAuth, family theme-sync
+aligned to xx.launcher.THEME_CHANGED. Phase G unchecked except R8
 sign-in which the old file marked done — re-verify on this phone.
 ```
 
@@ -27,18 +27,18 @@ sign-in which the old file marked done — re-verify on this phone.
 
 ## E1 — Theme sync
 
-Today: `dev.xxemail.action.THEME_SYNC` + `dev.xxemail.permission.THEME_SYNC`.
-Launcher sends `xx.launcher.THEME_CHANGED` with
-`com.piercingxx.xxlauncher.permission.THEME_SYNC`. Email is in
-`FAMILY_PACKAGES` and never restyles.
+Code: receiver action `xx.launcher.THEME_CHANGED`, extras
+`THEME_NAME` / `BACKGROUND`, uses-permission launcher `THEME_SYNC`
+(no `<permission>` declare). Named presets + Custom via BACKGROUND.
+`ThemeController` restyles Compose live. Device accept still open.
 
-- [ ] `uses-permission` the launcher permission name (do **not**
+- [x] `uses-permission` the launcher permission name (do **not**
   `<permission>`-declare it — mixed debug keys).
-- [ ] Receiver action `xx.launcher.THEME_CHANGED`. Map preset names
+- [x] Receiver action `xx.launcher.THEME_CHANGED`. Map preset names
   (AMOLED Night / Graphite / …) onto the in-app schemes.
-- [ ] Apply persisted ground on first frame; live broadcast restyles.
-- [ ] Manifest / receiver test like calculator.
-- **Accept:** change theme in xx-launcher; inbox ink changes without a
+- [x] Apply persisted ground on first frame; live broadcast restyles.
+- [x] Manifest / receiver test like calculator.
+- [ ] **Accept (device):** change theme in xx-launcher; inbox ink changes without a
   process death.
 
 ---

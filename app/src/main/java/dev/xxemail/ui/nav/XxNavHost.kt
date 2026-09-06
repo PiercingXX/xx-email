@@ -32,11 +32,18 @@ fun XxNavHost(notificationAccount: String? = null, notificationThreadId: String?
     val navController = rememberNavController()
     val graph = LocalContext.current.appGraph
     val accounts by graph.accounts.observeAccounts().collectAsStateWithLifecycle(initialValue = null)
-    val lastUsedAccount by graph.settings.lastAccountFlow.collectAsStateWithLifecycle(initialValue = null)
+    // Wait for DataStore's first real emission, not the collectAsState initialValue.
+    // Room can beat DataStore; treating lastAccount as null then picks accounts.first().
+    var lastAccountReady by remember { mutableStateOf(false) }
+    var lastUsedAccount by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        lastUsedAccount = graph.settings.lastAccount()
+        lastAccountReady = true
+    }
 
     // F1: never start at Setup while the account list is unknown — hold a minimal loading
-    // frame until Room emits, then land in Setup OR the mailbox the user actually left.
-    if (accounts == null) {
+    // frame until Room emits AND last-used is loaded, then land in Setup OR that mailbox.
+    if (accounts == null || !lastAccountReady) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator()
         }

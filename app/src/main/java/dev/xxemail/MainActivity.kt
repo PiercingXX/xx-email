@@ -13,6 +13,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import dev.xxemail.data.repo.ThemeMode
+import dev.xxemail.theme.ThemeController
 import dev.xxemail.ui.nav.LocalAuthLauncher
 import dev.xxemail.ui.nav.XxNavHost
 import dev.xxemail.ui.theme.ThemePreset
@@ -53,6 +54,7 @@ class MainActivity : ComponentActivity() {
             val themeMode by graph.settings.themeFlow.collectAsStateWithLifecycle(ThemeMode.SYSTEM)
             val dynamicColors by graph.settings.dynamicColorsFlow.collectAsStateWithLifecycle(true)
             val themePreset by graph.settings.themePresetFlow.collectAsStateWithLifecycle(ThemePreset.DEFAULT)
+            val familyTheme by ThemeController.theme.collectAsStateWithLifecycle()
             XxTheme(
                 darkTheme = when (themeMode) {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
@@ -61,6 +63,7 @@ class MainActivity : ComponentActivity() {
                 },
                 dynamicColor = dynamicColors,
                 preset = themePreset,
+                familyTheme = familyTheme,
             ) {
                 CompositionLocalProvider(LocalAuthLauncher provides ::launchOAuthFlow) {
                     XxNavHost(

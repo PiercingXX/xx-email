@@ -11,6 +11,10 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import dev.xxemail.theme.FOREGROUND_INK
+import dev.xxemail.theme.FOREGROUND_WHITE
+import dev.xxemail.theme.SyncedTheme
+import dev.xxemail.theme.foregroundFor
 
 private val Indigo = Color(0xFF23306B)
 
@@ -169,16 +173,52 @@ fun XxTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = true,
     preset: ThemePreset = ThemePreset.DEFAULT,
+    familyTheme: SyncedTheme? = null,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        // Custom preset keeps the app's own dynamic-colour behaviour.
-        dynamicColor && preset == ThemePreset.CUSTOM && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    val colorScheme = if (familyTheme != null) {
+        familyScheme(familyTheme)
+    } else {
+        when {
+            dynamicColor && preset == ThemePreset.CUSTOM && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+                val context = LocalContext.current
+                if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+            }
+            darkTheme -> presetDarkScheme(preset)
+            else -> presetLightScheme(preset)
         }
-        darkTheme -> presetDarkScheme(preset)
-        else -> presetLightScheme(preset)
     }
     MaterialTheme(colorScheme = colorScheme, content = content)
+}
+
+/** Family ground is the only source of truth once a launcher broadcast has landed. */
+private fun familyScheme(theme: SyncedTheme): ColorScheme {
+    val ground = Color(theme.background.toInt())
+    val ink = Color(foregroundFor(theme.background).toInt())
+    val onGround = if (theme.isDark) Color(FOREGROUND_WHITE.toInt()) else Color(FOREGROUND_INK.toInt())
+    return if (theme.isDark) {
+        darkColorScheme(
+            primary = Color(0xFFBAC3FF),
+            onPrimary = Color(0xFF08184B),
+            primaryContainer = Color(0xFF23306B),
+            secondary = Color(0xFFC2C5DD),
+            surface = ground,
+            onSurface = onGround,
+            background = ground,
+            onBackground = onGround,
+            onSecondary = ink,
+        )
+    } else {
+        lightColorScheme(
+            primary = Color(0xFF3A4A9F),
+            onPrimary = Color.White,
+            primaryContainer = Color(0xFFDEE1FF),
+            secondary = Color(0xFF595D72),
+            surface = ground,
+            onSurface = onGround,
+            background = ground,
+            onBackground = onGround,
+            onSecondary = ink,
+        )
+    }
 }

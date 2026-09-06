@@ -4,9 +4,9 @@
     <!-- The ONLY normal permission we need beyond notifications: network access to Google endpoints. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Family theme-sync: the launcher holds this permission (uses-permission only,
-         never declared here) so it alone can deliver preset broadcasts to ThemeSyncReceiver. -->
-    <uses-permission android:name="dev.xxemail.permission.THEME_SYNC" />
+    <!-- Family theme-sync: XX-Launcher owns the <permission> declare. uses-permission
+         only — a second declaration is INSTALL_FAILED_DUPLICATE_PERMISSION. -->
+    <uses-permission android:name="com.piercingxx.xxlauncher.permission.THEME_SYNC" />
 
     <!-- Custom Tabs needs to see browser apps on API 30+. -->
     <queries>
@@ -48,16 +48,15 @@
              ${appAuthRedirectScheme} placeholder ("dev.xxemail", see app/build.gradle.kts).
              Do NOT add that filter here; RedirectUriReceiverActivity must own the redirect. -->
 
-        <!-- Family theme-sync receiver (P0): gated by android:permission=THEME_SYNC
-             (uses-permission only, no <permission> declare) so only the launcher family
-             app can deliver preset broadcasts. Maps the launcher's seven presets + Custom
-             onto the M3 scheme and restyles live. -->
+        <!-- Family theme-sync: action + extras match xx-launcher ThemeBroadcaster.
+             Exported so the explicit setPackage broadcast arrives; gated so only
+             a holder of THEME_SYNC (the launcher) can deliver. -->
         <receiver
             android:name=".theme.ThemeSyncReceiver"
             android:exported="true"
-            android:permission="dev.xxemail.permission.THEME_SYNC">
+            android:permission="com.piercingxx.xxlauncher.permission.THEME_SYNC">
             <intent-filter>
-                <action android:name="dev.xxemail.action.THEME_SYNC" />
+                <action android:name="xx.launcher.THEME_CHANGED" />
             </intent-filter>
         </receiver>
 
