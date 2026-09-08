@@ -1,6 +1,7 @@
 package dev.xxemail.ui.settings
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -44,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.xxemail.appGraph
+import dev.xxemail.log.LogsUi
 import dev.xxemail.data.repo.SettingsRepository
 import dev.xxemail.data.repo.SwipeAction
 import dev.xxemail.data.repo.ThemeMode
@@ -188,6 +190,10 @@ fun SettingsScreen(onBack: () -> Unit, onAccountRemoved: (String) -> Unit = {}) 
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
+                TextButton(
+                    onClick = { (context as? Activity)?.let { LogsUi.show(it) } },
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                ) { Text("Logs") }
                 Spacer(Modifier.padding(bottom = 32.dp))
             }
         }

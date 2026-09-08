@@ -2,6 +2,7 @@ package dev.xxemail
 
 import android.app.Application
 import android.content.Context
+import dev.xxemail.log.AppLog
 import androidx.work.WorkManager
 import dev.xxemail.di.AppGraph
 import dev.xxemail.notify.Notifier
@@ -18,6 +19,9 @@ class XxEmailApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        AppLog.init(this)
+        AppLog.installCrashHandler()
+        AppLog.i("app", "start")
         graph = AppGraph(this)
         ThemeController.init(this)
         Notifier.ensureChannels(this)
