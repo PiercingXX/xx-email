@@ -1,22 +1,22 @@
 package dev.xxemail
 
 import android.content.Intent
+import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import dev.xxemail.data.repo.ThemeMode
 import dev.xxemail.theme.ThemeController
 import dev.xxemail.ui.nav.LocalAuthLauncher
 import dev.xxemail.ui.nav.XxNavHost
-import dev.xxemail.ui.theme.ThemePreset
 import dev.xxemail.ui.theme.XxTheme
 import kotlinx.coroutines.launch
 import net.openid.appauth.AuthorizationException
@@ -51,20 +51,21 @@ class MainActivity : ComponentActivity() {
         updateNotificationTarget(intent)
 
         setContent {
-            val themeMode by graph.settings.themeFlow.collectAsStateWithLifecycle(ThemeMode.SYSTEM)
-            val dynamicColors by graph.settings.dynamicColorsFlow.collectAsStateWithLifecycle(true)
-            val themePreset by graph.settings.themePresetFlow.collectAsStateWithLifecycle(ThemePreset.DEFAULT)
             val familyTheme by ThemeController.theme.collectAsStateWithLifecycle()
-            XxTheme(
-                darkTheme = when (themeMode) {
-                    ThemeMode.SYSTEM -> isSystemInDarkTheme()
-                    ThemeMode.LIGHT -> false
-                    ThemeMode.DARK -> true
-                },
-                dynamicColor = dynamicColors,
-                preset = themePreset,
-                familyTheme = familyTheme,
-            ) {
+            val resolved = familyTheme ?: ThemeController.DEFAULT
+            SideEffect {
+                val bg = resolved.background.toInt()
+                window.setBackgroundDrawable(ColorDrawable(bg))
+                @Suppress("DEPRECATION")
+                window.statusBarColor = bg
+                @Suppress("DEPRECATION")
+                window.navigationBarColor = bg
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !resolved.isDark
+                    isAppearanceLightNavigationBars = !resolved.isDark
+                }
+            }
+            XxTheme(familyTheme = resolved) {
                 CompositionLocalProvider(LocalAuthLauncher provides ::launchOAuthFlow) {
                     XxNavHost(
                         notificationAccount = notificationTarget?.first,

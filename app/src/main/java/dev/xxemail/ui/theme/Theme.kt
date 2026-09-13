@@ -1,7 +1,6 @@
 package dev.xxemail.ui.theme
 
 import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -11,10 +10,8 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import dev.xxemail.theme.FOREGROUND_INK
-import dev.xxemail.theme.FOREGROUND_WHITE
 import dev.xxemail.theme.SyncedTheme
-import dev.xxemail.theme.foregroundFor
+import dev.xxemail.theme.paletteFor
 
 private val Indigo = Color(0xFF23306B)
 
@@ -170,7 +167,7 @@ private fun presetDarkScheme(preset: ThemePreset): ColorScheme = when (preset) {
 
 @Composable
 fun XxTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    darkTheme: Boolean = true,
     dynamicColor: Boolean = true,
     preset: ThemePreset = ThemePreset.DEFAULT,
     familyTheme: SyncedTheme? = null,
@@ -191,34 +188,65 @@ fun XxTheme(
     MaterialTheme(colorScheme = colorScheme, content = content)
 }
 
-/** Family ground is the only source of truth once a launcher broadcast has landed. */
-private fun familyScheme(theme: SyncedTheme): ColorScheme {
-    val ground = Color(theme.background.toInt())
-    val ink = Color(foregroundFor(theme.background).toInt())
-    val onGround = if (theme.isDark) Color(FOREGROUND_WHITE.toInt()) else Color(FOREGROUND_INK.toInt())
+/** Family ground drives the whole M3 scheme — surfaces, type, and accent. */
+internal fun familyScheme(theme: SyncedTheme): ColorScheme {
+    val palette = paletteFor(theme)
+    val ground = Color(palette.background.toInt())
+    val surface = Color(palette.surfaceMid.toInt())
+    val surfaceLow = Color(palette.surfaceLow.toInt())
+    val surfaceHigh = Color(palette.surfaceHigh.toInt())
+    val onSurface = Color(palette.onSurface.toInt())
+    val muted = Color(palette.onSurfaceMuted.toInt())
+    val accent = Color(palette.accent.toInt())
+    val onAccent = Color(palette.onAccent.toInt())
+    val outline = Color(palette.outline.toInt())
     return if (theme.isDark) {
         darkColorScheme(
-            primary = Color(0xFFBAC3FF),
-            onPrimary = Color(0xFF08184B),
-            primaryContainer = Color(0xFF23306B),
-            secondary = Color(0xFFC2C5DD),
-            surface = ground,
-            onSurface = onGround,
+            primary = accent,
+            onPrimary = onAccent,
+            primaryContainer = surfaceHigh,
+            onPrimaryContainer = onSurface,
+            secondary = muted,
+            onSecondary = onSurface,
+            secondaryContainer = surfaceLow,
+            onSecondaryContainer = onSurface,
+            tertiary = accent,
+            onTertiary = onAccent,
             background = ground,
-            onBackground = onGround,
-            onSecondary = ink,
+            onBackground = onSurface,
+            surface = ground,
+            onSurface = onSurface,
+            surfaceVariant = surface,
+            onSurfaceVariant = muted,
+            outline = outline,
+            outlineVariant = Color(palette.surfaceHigh.toInt()),
+            inverseSurface = onSurface,
+            inverseOnSurface = ground,
+            inversePrimary = onAccent,
         )
     } else {
         lightColorScheme(
-            primary = Color(0xFF3A4A9F),
-            onPrimary = Color.White,
-            primaryContainer = Color(0xFFDEE1FF),
-            secondary = Color(0xFF595D72),
-            surface = ground,
-            onSurface = onGround,
+            primary = accent,
+            onPrimary = onAccent,
+            primaryContainer = surfaceHigh,
+            onPrimaryContainer = onSurface,
+            secondary = muted,
+            onSecondary = onSurface,
+            secondaryContainer = surfaceLow,
+            onSecondaryContainer = onSurface,
+            tertiary = accent,
+            onTertiary = onAccent,
             background = ground,
-            onBackground = onGround,
-            onSecondary = ink,
+            onBackground = onSurface,
+            surface = ground,
+            onSurface = onSurface,
+            surfaceVariant = surface,
+            onSurfaceVariant = muted,
+            outline = outline,
+            outlineVariant = Color(palette.surfaceHigh.toInt()),
+            inverseSurface = onSurface,
+            inverseOnSurface = ground,
+            inversePrimary = onAccent,
         )
     }
 }
