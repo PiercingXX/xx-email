@@ -8,7 +8,8 @@ import android.net.Uri
 import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,7 +39,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -48,8 +48,9 @@ import dev.xxemail.appGraph
 import dev.xxemail.log.LogsUi
 import dev.xxemail.data.repo.SettingsRepository
 import dev.xxemail.data.repo.SwipeAction
-import dev.xxemail.data.repo.ThemeMode
 import dev.xxemail.sync.SyncScheduler
+import dev.xxemail.theme.FamilyPreset
+import dev.xxemail.theme.ThemeController
 import kotlinx.coroutines.launch
 
 private const val REVOKE_URL = "https://myaccount.google.com/permissions"
@@ -67,8 +68,7 @@ fun SettingsScreen(onBack: () -> Unit, onAccountRemoved: (String) -> Unit = {}) 
     val swipeRight by settings.swipeRightFlow.collectAsStateWithLifecycle(SwipeAction.DELETE)
     val undoSeconds by settings.undoSecondsFlow.collectAsStateWithLifecycle(SettingsRepository.DEFAULT_UNDO_SECONDS)
     val sendArchive by settings.sendAndArchiveFlow.collectAsStateWithLifecycle(false)
-    val theme by settings.themeFlow.collectAsStateWithLifecycle(ThemeMode.SYSTEM)
-    val dynamic by settings.dynamicColorsFlow.collectAsStateWithLifecycle(true)
+    val familyTheme by ThemeController.theme.collectAsStateWithLifecycle()
     val notifications by settings.notificationsEnabledFlow.collectAsStateWithLifecycle(true)
     val syncMinutes by settings.syncMinutesFlow.collectAsStateWithLifecycle(SettingsRepository.DEFAULT_SYNC_MINUTES)
     val remoteImages by settings.remoteImagesFlow.collectAsStateWithLifecycle(false)
@@ -148,17 +148,21 @@ fun SettingsScreen(onBack: () -> Unit, onAccountRemoved: (String) -> Unit = {}) 
             }
             item {
                 SectionHeader("Appearance")
-                Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    ThemeMode.entries.forEach { mode ->
+                val selectedKey = familyTheme?.presetKey
+                    ?: ThemeController.DEFAULT.presetKey
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    FamilyPreset.entries.forEach { preset ->
                         FilterChip(
-                            selected = theme == mode,
-                            onClick = { scope.launch { settings.setTheme(mode) } },
-                            label = { Text(mode.name.lowercase().replaceFirstChar { it.uppercase() }) },
-                            modifier = Modifier.padding(end = 8.dp),
+                            selected = selectedKey == preset.key,
+                            onClick = { ThemeController.applyPreset(context, preset) },
+                            label = { Text(preset.displayName) },
+                            modifier = Modifier.padding(end = 8.dp, bottom = 8.dp),
                         )
                     }
                 }
-                ToggleRow("Dynamic colors (Material You)", dynamic) { scope.launch { settings.setDynamicColors(it) } }
                 // F6: remote images load ONLY while this is on (default off — tracking pixels).
                 ToggleRow("Load remote images", remoteImages) { scope.launch { settings.setRemoteImages(it) } }
                 HorizontalDivider()

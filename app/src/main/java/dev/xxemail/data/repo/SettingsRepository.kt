@@ -39,7 +39,7 @@ class SettingsRepository(private val context: Context) {
     val undoSecondsFlow: Flow<Int> = context.settingsDataStore.data.map { it[Keys.UNDO_SECONDS] ?: DEFAULT_UNDO_SECONDS }
     val swipeLeftFlow: Flow<SwipeAction> = context.settingsDataStore.data.map { enumOr(it[Keys.SWIPE_LEFT], SwipeAction.ARCHIVE) }
     val swipeRightFlow: Flow<SwipeAction> = context.settingsDataStore.data.map { enumOr(it[Keys.SWIPE_RIGHT], SwipeAction.DELETE) }
-    val themeFlow: Flow<ThemeMode> = context.settingsDataStore.data.map { enumOr(it[Keys.THEME], ThemeMode.SYSTEM) }
+    val themeFlow: Flow<ThemeMode> = context.settingsDataStore.data.map { enumOr(it[Keys.THEME], ThemeMode.DARK) }
     val themePresetFlow: Flow<ThemePreset> = context.settingsDataStore.data.map { ThemePreset.fromId(it[Keys.THEME_PRESET]) }
     val dynamicColorsFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[Keys.DYNAMIC_COLORS] ?: true }
     val sendAndArchiveFlow: Flow<Boolean> = context.settingsDataStore.data.map { it[Keys.SEND_AND_ARCHIVE] ?: false }
