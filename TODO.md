@@ -15,6 +15,15 @@ sign-in which the old file marked done — re-verify on this phone.
 
 ---
 
+## WAVE-1 — catalog only (operator 2026-09-17)
+
+Email stays **Google OAuth**. Skippy is not a Google account. Default-off
+in xx-apps until granted. No fabric auto-login. Disable-user uninstall
+is xx-apps’ job.
+
+- [ ] Em-E1 — Package stays `dev.xxemail`. Do not add a Skippy password
+      screen. Document “sign in with Google after install.”
+
 ## Locked now (2026-09-04)
 
 | ID | Decision |
