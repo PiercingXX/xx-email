@@ -10,6 +10,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import dev.xxemail.XxEmailApp
+import dev.xxemail.log.AppLog
 import dev.xxemail.di.AppGraph
 import dev.xxemail.notify.Notifier
 import kotlinx.coroutines.flow.first
@@ -24,6 +25,7 @@ class SyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
         if (accounts.isEmpty()) return Result.success()
 
         val forceFull = inputData.getBoolean(KEY_FORCE_FULL, false)
+        AppLog.i("sync", "start accounts=${accounts.size} forceFull=$forceFull")
         var successes = 0
         for (account in accounts) {
             val outcome = graph.mailRepository(account.email).sync(forceFull = forceFull)
@@ -32,8 +34,9 @@ class SyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
                 if (result.newInboxThreads.isNotEmpty() && graph.settings.notificationsEnabled()) {
                     Notifier.notifyNewMail(applicationContext, account.email, result.newInboxThreads)
                 }
-            }
+            }.onFailure { AppLog.w("sync", "account failed", it) }
         }
+        AppLog.i("sync", "done ok=$successes of ${accounts.size}")
         return when {
             successes > 0 -> Result.success()
             runAttemptCount < 3 -> Result.retry()

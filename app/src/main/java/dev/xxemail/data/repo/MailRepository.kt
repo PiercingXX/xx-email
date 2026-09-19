@@ -2,6 +2,7 @@ package dev.xxemail.data.repo
 
 import android.content.Context
 import android.util.Log
+import dev.xxemail.log.AppLog
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
@@ -149,7 +150,8 @@ class MailRepository(
             val unreadNow = threadDao.inboxAll(accountEmail).filter { it.unreadCount > 0 }
             Result.success(SyncResult(NewMailDetector.newArrivals(knownInboxIdsBefore, unreadNow)))
         }.getOrElse {
-            Log.w(TAG, "sync failed for $accountEmail", it)
+            Log.w(TAG, "sync failed", it)
+            AppLog.w("sync", "failed", it)
             Result.failure(it)
         }
     }
